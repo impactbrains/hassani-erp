@@ -13,7 +13,9 @@ use App\Http\Controllers\PosController;
 use App\Http\Controllers\PosDocumentController;
 use App\Http\Controllers\PosRefundController;
 use App\Http\Controllers\BarcodeController;
- use App\Http\Controllers\ContactController;
+use App\Http\Controllers\ContactController;
+use App\Http\Controllers\EmployeeController;
+use App\Http\Controllers\TaskController;
 
 Route::get('/', function () {
     return Inertia::render('Welcome');
@@ -24,6 +26,45 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/dashboard', function () {
         return Inertia::render('dashboard/Index');
     })->name('dashboard');
+    // --- Public careers pages (no login required) ---
+    Route::prefix('careers')->name('careers.')->group(function () {
+        Route::get('/', [CareersController::class, 'index'])->name('index');
+
+        Route::get('/apply', [CareersController::class, 'showJobApplication'])->name('apply');
+        Route::post('/apply', [CareersController::class, 'submitJobApplication'])
+            ->middleware('throttle:5,60')
+            ->name('apply.store');
+
+        Route::get('/supplier-apply', [CareersController::class, 'showSupplierApplication'])->name('supplier-apply');
+        Route::post('/supplier-apply', [CareersController::class, 'submitSupplierApplication'])
+            ->middleware('throttle:5,60')
+            ->name('supplier-apply.store');
+    });
+    Route::middleware(['app.access:todo'])->prefix('todo')->name('todo.')->group(function () {
+        Route::get('/', [TaskController::class, 'index'])->name('index');
+    
+        // Full creation UI (assign to anyone) — admin only.
+        Route::middleware(['admin'])->group(function () {
+            Route::get('/create', [TaskController::class, 'create'])->name('create');
+            Route::post('/', [TaskController::class, 'store'])->name('store');
+        });
+    
+        // Self-service creation — any staff member with todo access,
+        // hard-locked to assigning only themselves inside the controller.
+        Route::get('/create-own', [TaskController::class, 'createOwn'])->name('create-own');
+        Route::post('/own', [TaskController::class, 'storeSelf'])->name('store-own');
+    
+        // Edit/update/destroy: reachable by any staff member at the route
+        // level — the actual "admin OR creator" check happens inside each
+        // controller method, since it depends on the specific task.
+        Route::get('/{task}/edit', [TaskController::class, 'edit'])->name('edit');
+        Route::put('/{task}', [TaskController::class, 'update'])->name('update');
+        Route::delete('/{task}', [TaskController::class, 'destroy'])->name('destroy');
+    
+        // Status updates — any staff member who is admin, an assignee, or
+        // the creator (enforced inside updateStatus()).
+        Route::patch('/{task}/status', [TaskController::class, 'updateStatus'])->name('status');
+    });
 
     // --- POS ---
    Route::middleware(['app.access:pos'])->prefix('pos')->name('pos.')->group(function () {
@@ -84,11 +125,52 @@ Route::middleware(['app.access:inventory'])->prefix('inventory')->name('inventor
     });
 
     // --- Contacts ---
-    Route::middleware(['app.access:contacts'])->prefix('contacts')->name('contacts.')->group(function () {
-        Route::get('/', function () {
-            return Inertia::render('contacts/Index');
-        })->name('index');
-    });
+   Route::middleware(['app.access:contacts'])->prefix('contacts')->name('contacts.')->group(function () {
+    Route::get('/', [ContactController::class, 'index'])->name('index');
+    Route::get('/history', [ContactController::class, 'history'])->name('history');
+
+    Route::get('/employees', [ContactController::class, 'employees'])->name('employees');
+    Route::get('/suppliers-view', [ContactController::class, 'suppliers'])->name('suppliers-view');
+    
+    Route::get('/create', [ContactController::class, 'create'])->name('create');
+    Route::post('/', [ContactController::class, 'store'])->name('store');
+    Route::get('/{contact}', [ContactController::class, 'show'])->name('show');
+    Route::get('/{contact}/edit', [ContactController::class, 'edit'])->name('edit');
+    Route::put('/{contact}', [ContactController::class, 'update'])->name('update');
+    Route::delete('/{contact}', [ContactController::class, 'destroy'])->name('destroy');
+
+    Route::post('/{contact}/apply-as-candidate', [ContactController::class, 'applyAsCandidate'])->name('apply-as-candidate');
+    Route::post('/{contact}/advance-stage', [ContactController::class, 'advanceCandidateStage'])->name('advance-stage');
+    Route::post('/{contact}/hire', [ContactController::class, 'hireCandidate'])->name('hire');
+    Route::post('/{contact}/reject', [ContactController::class, 'rejectCandidate'])->name('reject');
+
+    Route::post('/{contact}/records', [ContactController::class, 'storeRecord'])->name('records.store');
+    Route::put('/{contact}/records/{record}', [ContactController::class, 'updateRecord'])->name('records.update');
+    Route::delete('/{contact}/records/{record}', [ContactController::class, 'destroyRecord'])->name('records.destroy');
+});
+
+// --- Employee HR profile (separate nested group — do NOT merge into the block above) ---
+Route::middleware(['app.access:contacts'])->prefix('contacts/{contact}/employee')->name('contacts.employee.')->group(function () {
+    Route::get('/', [EmployeeController::class, 'show'])->name('show');
+
+    Route::put('/work', [EmployeeController::class, 'updateWork'])->name('work.update');
+    Route::put('/schedule', [EmployeeController::class, 'updateSchedule'])->name('schedule.update');
+    Route::put('/personal', [EmployeeController::class, 'updatePersonal'])->name('personal.update');
+    Route::put('/resume-file', [EmployeeController::class, 'updateResumeFile'])->name('resume-file.update');
+
+    Route::post('/resume-items', [EmployeeController::class, 'storeResumeItem'])->name('resume-items.store');
+    Route::put('/resume-items/{resumeItem}', [EmployeeController::class, 'updateResumeItem'])->name('resume-items.update');
+    Route::delete('/resume-items/{resumeItem}', [EmployeeController::class, 'destroyResumeItem'])->name('resume-items.destroy');
+
+    Route::post('/skills', [EmployeeController::class, 'attachSkill'])->name('skills.attach');
+    Route::post('/skills/create', [EmployeeController::class, 'storeSkill'])->name('skills.store');
+    Route::delete('/skills/{skill}', [EmployeeController::class, 'detachSkill'])->name('skills.detach');
+
+    Route::post('/badges', [EmployeeController::class, 'attachBadge'])->name('badges.attach');
+    Route::delete('/badges/{badge}', [EmployeeController::class, 'detachBadge'])->name('badges.detach');
+
+    Route::get('/history', [EmployeeController::class, 'historyIndex'])->name('history');
+});
 
     Route::middleware(['admin'])->prefix('users')->name('users.')->group(function () {
         Route::get('/', [UserPermissionController::class, 'index'])->name('index');
@@ -160,15 +242,6 @@ Route::middleware(['app.access:inventory'])->prefix('inventory')->name('inventor
         Route::post('/pool/bulk-print', [BarcodeController::class, 'bulkPrint'])->name('pool.bulk-print');
     });
    
-    Route::middleware(['app.access:contacts'])->prefix('contacts')->name('contacts.')->group(function () {
-        Route::get('/', [ContactController::class, 'index'])->name('index');
-        Route::get('/create', [ContactController::class, 'create'])->name('create');
-        Route::post('/', [ContactController::class, 'store'])->name('store');
-        Route::get('/{contact}', [ContactController::class, 'show'])->name('show');
-        Route::get('/{contact}/edit', [ContactController::class, 'edit'])->name('edit');
-        Route::put('/{contact}', [ContactController::class, 'update'])->name('update');
-        Route::delete('/{contact}', [ContactController::class, 'destroy'])->name('destroy');
-    });
 });
 
 require __DIR__.'/settings.php';

@@ -97,7 +97,7 @@ export const apps: DashboardApp[] = [
         routeName: 'todo.index',
         icon: 'CheckSquare',
         group: 'productivity',
-        enabled: false,
+        enabled: true,
     },
     {
         key: 'chat',

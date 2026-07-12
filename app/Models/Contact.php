@@ -5,6 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Contact extends Model
 {
@@ -13,6 +15,11 @@ class Contact extends Model
     protected $fillable = [
         'user_id',
         'type',
+        'previous_type',
+        'track',
+        'stage',
+        'application_notes',
+        'applied_at',
         'name',
         'email',
         'phone',
@@ -26,12 +33,18 @@ class Contact extends Model
     {
         return [
             'is_active' => 'boolean',
+            'applied_at' => 'datetime',
         ];
     }
 
     public function documents(): HasMany
     {
         return $this->hasMany(Document::class, 'contact_id');
+    }
+
+    public function records(): HasMany
+    {
+        return $this->hasMany(ContactRecord::class);
     }
 
     public function scopeCustomers($query)
@@ -47,6 +60,68 @@ class Contact extends Model
     public function scopeEmployees($query)
     {
         return $query->where('type', 'employee');
+    }
+
+    public function scopeCandidates($query, ?string $track = null)
+    {
+        $query->where('type', 'candidate');
+
+        return $track ? $query->where('track', $track) : $query;
+    }
+
+    /**
+     * Starts (or restarts) this contact's candidate pipeline for a given
+     * track. If they already have a "real" type (customer/supplier), that
+     * gets preserved in previous_type so it can be restored on rejection.
+     * Called both by internal "convert to candidate" actions and by the
+     * public application forms creating a fresh Contact.
+     */
+    public function applyAsCandidate(string $track, ?string $notes = null): void
+    {
+        $this->update([
+            'previous_type' => $this->type !== 'candidate' ? $this->type : $this->previous_type,
+            'type' => 'candidate',
+            'track' => $track,
+            'stage' => 'applied',
+            'application_notes' => $notes,
+            'applied_at' => now(),
+        ]);
+    }
+
+    /**
+     * Advances the candidate to a new pipeline stage without changing
+     * their type — used for applied → reviewing → interview transitions.
+     */
+    public function advanceStage(string $stage): void
+    {
+        $this->update(['stage' => $stage]);
+    }
+
+    /**
+     * Hires the candidate — flips their type to the outcome matching
+     * their track (employee or supplier). The employee 5-tab profile
+     * becomes relevant/populated from this point on.
+     */
+    public function hire(): void
+    {
+        $this->update([
+            'type' => $this->track === 'supplier' ? 'supplier' : 'employee',
+            'stage' => 'hired',
+        ]);
+    }
+
+    /**
+     * Rejects the candidate — restores their previous type if they had
+     * one (e.g. they were already a customer), or simply marks the
+     * candidate record as rejected if this was a fresh public applicant
+     * with no prior relationship to revert to.
+     */
+    public function reject(): void
+    {
+        $this->update([
+            'type' => $this->previous_type ?? 'candidate',
+            'stage' => 'rejected',
+        ]);
     }
 
     /**
@@ -78,5 +153,58 @@ class Contact extends Model
             ->where('type', 'pos_order')
             ->where('status', 'paid')
             ->count();
+    }
+
+    public function employeeDetail(): HasOne
+    {
+        return $this->hasOne(EmployeeDetail::class);
+    }
+
+    public function workSchedules(): HasMany
+    {
+        return $this->hasMany(EmployeeWorkSchedule::class)->orderBy('day');
+    }
+
+    public function resumeItems(): HasMany
+    {
+        return $this->hasMany(EmployeeResumeItem::class)->orderBy('sort_order');
+    }
+
+    public function skills(): BelongsToMany
+    {
+        return $this->belongsToMany(Skill::class, 'employee_skill')
+            ->withPivot('level')
+            ->withTimestamps();
+    }
+
+    public function badges(): BelongsToMany
+    {
+        return $this->belongsToMany(Badge::class, 'employee_badge')
+            ->withPivot('awarded_at')
+            ->withTimestamps();
+    }
+
+    public function directReports(): HasMany
+    {
+        return $this->hasMany(EmployeeDetail::class, 'manager_contact_id');
+    }
+
+    public function activityHistory(): \Illuminate\Support\Collection
+    {
+        $asSubject = \App\Models\ActivityLog::where('subject_type', self::class)
+            ->where('subject_id', $this->id)
+            ->with('user:id,name')
+            ->get();
+
+        $asUser = $this->user_id
+            ? \App\Models\ActivityLog::where('user_id', $this->user_id)
+                ->with('user:id,name')
+                ->get()
+            : collect();
+
+        return $asSubject->concat($asUser)
+            ->unique('id')
+            ->sortByDesc('created_at')
+            ->values();
     }
 }

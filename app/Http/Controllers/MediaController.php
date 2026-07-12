@@ -33,34 +33,49 @@ class MediaController extends Controller
      * Upload a new file into the shared media library.
      */
     public function store(Request $request)
-    {
-        $validated = $request->validate([
-            'image' => ['required', 'image', 'max:4096'],
-            'name' => ['nullable', 'string', 'max:255'],
-        ]);
-
-        $file = $request->file('image');
-        $filename = uniqid('media_') . '.' . $file->getClientOriginalExtension();
-
-        $destination = public_path(self::UPLOAD_DIRECTORY);
-        if (! File::isDirectory($destination)) {
-            File::makeDirectory($destination, 0755, true);
-        }
-
-        $file->move($destination, $filename);
-
-        $media = Media::create([
-            'type' => 'upload',
-            'path' => $filename,
-            'name' => $validated['name'] ?? null,
-        ]);
-
-        return response()->json([
-            'id' => $media->id,
-            'name' => $media->name,
-            'url' => $media->resolvedUrl(),
-        ]);
+{
+    $isImage = $request->hasFile('file')
+        && str_starts_with((string) $request->file('file')->getClientMimeType(), 'image/');
+ 
+    $validated = $request->validate([
+        'file' => [
+            'required',
+            'file',
+            'max:4096',
+            $isImage ? 'image' : 'mimes:pdf,doc,docx',
+        ],
+        'name' => ['nullable', 'string', 'max:255'],
+    ]);
+ 
+    $file = $request->file('file');
+    $filename = uniqid('media_') . '.' . $file->getClientOriginalExtension();
+ 
+    $destination = public_path(self::UPLOAD_DIRECTORY);
+    if (! File::isDirectory($destination)) {
+        File::makeDirectory($destination, 0755, true);
     }
+ 
+    $file->move($destination, $filename);
+ 
+    $media = Media::create([
+        'type' => 'upload',
+        'path' => $filename,
+        'name' => $validated['name'] ?? $file->getClientOriginalName(),
+        'original_name' => $file->getClientOriginalName(),
+        'mime_type' => $file->getClientMimeType(),
+        'size' => $file->getSize(),
+    ]);
+ 
+    return response()->json([
+        'id' => $media->id,
+        'name' => $media->name,
+        'url' => $media->resolvedUrl(),
+        'original_name' => $media->original_name,
+        'mime_type' => $media->mime_type,
+        'is_image' => $media->is_image,
+        'formatted_size' => $media->formatted_size,
+    ]);
+}
 
     /**
      * Register an external image URL into the shared media library,

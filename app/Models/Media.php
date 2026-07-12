@@ -28,4 +28,36 @@ class Media extends Model
 
         return $this->path ? asset('uploads/media/' . $this->path) : null;
     }
+    public function getIsImageAttribute(): bool
+{
+    if ($this->type === 'url') {
+        // Can't sniff a remote URL's mime type without an HTTP call, so
+        // assume image — url-type media in this system has only ever
+        // been used for image links so far.
+        return true;
+    }
+ 
+    if ($this->mime_type === null) {
+        return true;
+    }
+ 
+    return str_starts_with($this->mime_type, 'image/');
+}
+    public function getFormattedSizeAttribute(): ?string
+    {
+        if (! $this->size) {
+            return null;
+        }
+    
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $bytes = $this->size;
+        $i = 0;
+    
+        while ($bytes >= 1024 && $i < count($units) - 1) {
+            $bytes /= 1024;
+            $i++;
+        }
+    
+        return round($bytes, 1) . ' ' . $units[$i];
+    }
 }
