@@ -3,7 +3,7 @@ import PageHeader from '@/components/ui/PageHeader.vue';
 import Pagination from '@/components/ui/Pagination.vue';
 import Button from '@/components/ui/Button.vue';
 import Badge from '@/components/ui/Badge.vue';
-import { Link } from '@inertiajs/vue3';
+import { Link, router } from '@inertiajs/vue3';
 import { useFilters } from '@/composables/useFilters';
 import { money } from '@/lib/format';
 import { can } from '@/lib/perms';
@@ -13,6 +13,17 @@ import { colorHex } from '@/lib/colors';
 const props = defineProps<{ customers: any; filters: Record<string, any>; canExport: boolean }>();
 const filters = useFilters('crm.customers.index', { q: props.filters.q ?? '', category: props.filters.category ?? '', with_balance: props.filters.with_balance ?? '', area: props.filters.area ?? '', sort: props.filters.sort ?? '' });
 const categories: Record<string, string> = { retail: 'Retail', wholesale: 'Wholesale', shopkeeper: 'Shopkeeper', institution: 'Institution' };
+
+function openCustomer(e: MouseEvent, id: number | string) {
+    // Let real links/buttons/inputs handle their own clicks
+    if ((e.target as HTMLElement).closest('a, button, input, select, label')) return;
+    const url = route('crm.customers.show', id);
+    if (e.metaKey || e.ctrlKey) {
+        window.open(url, '_blank');
+        return;
+    }
+    router.visit(url);
+}
 </script>
 
 <template>
@@ -33,7 +44,7 @@ const categories: Record<string, string> = { retail: 'Retail', wholesale: 'Whole
         <table class="table-base khata">
             <thead><tr><th class="ps-12">{{ t('Customer') }}</th><th>{{ t('Phone') }}</th><th>{{ t('Area') }}</th><th>{{ t('Type') }}</th><th class="num">{{ t('Credit limit') }}</th><th class="num">{{ t('Khata balance') }}</th><th>{{ t('Credit') }}</th></tr></thead>
             <tbody>
-                <tr v-for="c in customers.data" :key="c.id">
+                <tr v-for="c in customers.data" :key="c.id" class="cursor-pointer hover:bg-black/5" @click="openCustomer($event, c.id)">
                     <td class="ps-12"><Link :href="route('crm.customers.show', c.id)" class="font-medium text-ink-900 hover:underline">{{ c.name }}</Link><div class="text-[12px] text-ink-500">{{ c.code }}<span v-if="c.name_ur" class="urdu ms-2">{{ c.name_ur }}</span></div>
                         <div v-if="c.tags?.length" class="mt-0.5 flex gap-1"><span v-for="tg in c.tags" :key="tg.id" class="rounded px-1.5 text-[11px]" :style="{ background: colorHex(tg.color) + '22', color: colorHex(tg.color) }">{{ tg.name }}</span></div></td>
                     <td>{{ c.phone ?? '—' }}</td><td>{{ c.area ?? '—' }}</td><td>{{ t(categories[c.customer_profile?.category] ?? '—') }}</td>

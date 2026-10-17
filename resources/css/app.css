@@ -10,37 +10,125 @@
 @tailwind utilities;
 
 @layer base {
-    html { -webkit-text-size-adjust: 100%; }
-    body { @apply bg-paper font-sans text-[15px] leading-6 text-graphite antialiased; font-feature-settings: 'tnum' 1; }
-    [dir='rtl'] body, .urdu { font-family: theme('fontFamily.urdu'); }
-    .urdu, [lang='ur'] { line-height: 2.05; }
-    :focus-visible { @apply outline-none ring-2 ring-haldi-400 ring-offset-1; }
-    h1 { @apply text-xl font-semibold tracking-tight text-ink-900; }
-    h2 { @apply text-base font-semibold text-ink-900; }
-    h3 { @apply text-sm font-semibold text-ink-800; }
-    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+    html {
+        -webkit-text-size-adjust: 100%;
+    }
+
+    body {
+        @apply bg-paper font-sans text-[15px] leading-6 text-graphite antialiased;
+        font-feature-settings: 'tnum' 1;
+    }
+
+    [dir='rtl'] body,
+    .urdu {
+        font-family: theme('fontFamily.urdu');
+    }
+
+    .urdu,
+    [lang='ur'] {
+        line-height: 2.05;
+    }
+
+    :focus-visible {
+        @apply outline-none ring-2 ring-haldi-400 ring-offset-1;
+    }
+
+    h1 {
+        @apply text-xl font-semibold tracking-tight text-ink-900;
+    }
+
+    h2 {
+        @apply text-base font-semibold text-ink-900;
+    }
+
+    h3 {
+        @apply text-sm font-semibold text-ink-800;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+
+        *,
+        *::before,
+        *::after {
+            animation-duration: .01ms !important;
+            transition-duration: .01ms !important;
+        }
+    }
 }
 
 @layer components {
-    .panel { @apply rounded-lg border border-ink-100 bg-white shadow-panel; }
-    .panel-head { @apply flex items-center justify-between gap-3 border-b border-ink-100 px-4 py-3; }
-    .field-label { @apply mb-1 block text-[13px] font-medium text-ink-700; }
-    .input { @apply block w-full rounded border-ink-200 bg-white px-3 py-2 text-[15px] text-graphite placeholder:text-ink-300 focus:border-haldi-500 focus:ring-haldi-400 disabled:bg-ink-50 disabled:text-ink-400; }
-    .table-base { @apply w-full border-collapse text-sm; }
-    .table-base th { @apply whitespace-nowrap border-b border-ink-200 bg-ink-50/60 px-3 py-2 text-start text-[12.5px] font-semibold text-ink-600; }
-    .table-base td { @apply border-b border-ink-100 px-3 py-2 align-top; }
-    .table-base tbody tr:hover td { @apply bg-haldi-50/40; }
-    .num { @apply whitespace-nowrap text-end tabular-nums; }
-    .table-base th.num, .table-base th.text-end { text-align: end; }
-    .link { @apply font-medium text-ink-700 underline decoration-ink-200 underline-offset-2 hover:decoration-haldi-500; }
+    .panel {
+        @apply rounded-lg border border-ink-100 bg-white shadow-panel;
+    }
+
+    .panel-head {
+        @apply flex items-center justify-between gap-3 border-b border-ink-100 px-4 py-3;
+    }
+
+    .field-label {
+        @apply mb-1 block text-[13px] font-medium text-ink-700;
+    }
+
+    .input {
+        @apply block w-full rounded border-ink-200 bg-white px-3 py-2 text-[15px] text-graphite placeholder:text-ink-300 focus:border-haldi-500 focus:ring-haldi-400 disabled:bg-ink-50 disabled:text-ink-400;
+    }
+
+    .table-base {
+        @apply w-full border-collapse text-sm;
+    }
+
+    .table-base th {
+        @apply whitespace-nowrap border-b border-ink-200 bg-ink-50/60 px-3 py-2 text-start text-[12.5px] font-semibold text-ink-600;
+    }
+
+    .table-base td {
+        @apply border-b border-ink-100 px-3 py-2 align-top;
+    }
+
+    .table-base tbody tr:hover td {
+        @apply bg-haldi-50/40;
+    }
+
+    .num {
+        @apply whitespace-nowrap text-end tabular-nums;
+    }
+
+    .table-base th.num,
+    .table-base th.text-end {
+        text-align: end;
+    }
+
+    .link {
+        @apply font-medium text-ink-700 underline decoration-ink-200 underline-offset-2 hover:decoration-haldi-500;
+    }
 
     /* Khata ruling: ruled register rows with the red margin line. */
-    .khata { background-image: linear-gradient(to right, transparent 2.25rem, rgba(200, 64, 47, .55) 2.25rem, rgba(200, 64, 47, .55) calc(2.25rem + 1.5px), transparent calc(2.25rem + 1.5px)); }
-    [dir='rtl'] .khata { background-image: linear-gradient(to left, transparent 2.25rem, rgba(200, 64, 47, .55) 2.25rem, rgba(200, 64, 47, .55) calc(2.25rem + 1.5px), transparent calc(2.25rem + 1.5px)); }
-    .khata td, .khata th { @apply border-b border-sky-200/70; }
+    .khata {
+        background-image: linear-gradient(to right, transparent 2.25rem, rgba(200, 64, 47, .55) 2.25rem, rgba(200, 64, 47, .55) calc(2.25rem + 1.5px), transparent calc(2.25rem + 1.5px));
+    }
+
+    [dir='rtl'] .khata {
+        background-image: linear-gradient(to left, transparent 2.25rem, rgba(200, 64, 47, .55) 2.25rem, rgba(200, 64, 47, .55) calc(2.25rem + 1.5px), transparent calc(2.25rem + 1.5px));
+    }
+
+    .khata td,
+    .khata th {
+        @apply border-b border-sky-200/70;
+    }
+
+    /* Keep first-column text clear of the margin line */
+    .khata th:first-child,
+    .khata td:first-child {
+        padding-inline-start: 3rem;
+    }
 }
 
 @media print {
-    body { background: white; }
-    .no-print { display: none !important; }
+    body {
+        background: white;
+    }
+
+    .no-print {
+        display: none !important;
+    }
 }
