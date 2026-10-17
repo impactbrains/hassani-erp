@@ -110,6 +110,7 @@ Route::middleware('auth')->group(function () {
             Route::get('/shifts', 'index')->name('shifts.index');
             Route::get('/shifts/{shift}', 'show')->name('shifts.show');
             Route::post('/shifts', 'open')->name('shifts.open')->middleware('perm:pos.shift.open');
+            Route::post('/shifts/join', [PosController::class, 'join'])->name('shifts.join')->middleware('perm:pos.shift.join');
             Route::get('/shifts/{shift}/x-report', 'xReport')->name('shifts.x');
             Route::post('/shifts/{shift}/cash', 'cash')->name('shifts.cash');
             Route::post('/shifts/{shift}/close', 'close')->name('shifts.close')->middleware('perm:pos.shift.close');

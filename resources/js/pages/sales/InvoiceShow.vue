@@ -31,13 +31,31 @@ const busy = ref(false);
 const error = ref('');
 const approvalOpen = ref(false);
 const lastNote = ref<any>(null);
+const reprintEl = ref<HTMLElement | null>(null);
+const noteEl = ref<HTMLElement | null>(null);
 let key = uuid();
 
 const returnable = (l: any) => Number(l.base_quantity) - Number(l.base_quantity_returned ?? 0);
 const lines = computed(() => props.invoice.lines.filter((l: any) => returnable(l) > 0));
 const cashMethods = computed(() => (options.payment_methods ?? []).filter((m: any) => m.type === 'cash' || m.type === 'wallet' || m.type === 'bank'));
 
-function print() {
+/**
+ * Prints just one receipt. A copy of it is placed directly under <body> and
+ * everything else on the screen is hidden while printing (see the style block
+ * at the bottom), so the menu, tables and modals never reach the paper.
+ */
+function printElement(el: HTMLElement | null) {
+    if (!el) return;
+    document.getElementById('print-root')?.remove();
+    const root = document.createElement('div');
+    root.id = 'print-root';
+    root.appendChild(el.cloneNode(true));
+    document.body.appendChild(root);
+    document.body.classList.add('printing-one');
+    window.addEventListener('afterprint', () => {
+        root.remove();
+        document.body.classList.remove('printing-one');
+    }, { once: true });
     window.print();
 }
 async function submit(token: string | null = null) {
@@ -69,7 +87,7 @@ async function submit(token: string | null = null) {
     <PageHeader :title="invoice.number" :subtitle="`${dateTime(invoice.posted_at)} · ${invoice.cashier?.name ?? ''} · ${invoice.store?.name ?? ''}`">
         <template #actions>
             <Badge :status="invoice.payment_status" />
-            <Button @click="print"><Printer class="h-4 w-4" />{{ t('Reprint') }}</Button>
+            <Button @click="printElement(reprintEl)"><Printer class="h-4 w-4" />{{ t('Reprint') }}</Button>
             <Button v-if="canReturn && lines.length" variant="primary" @click="returning = true"><RotateCcw class="h-4 w-4" />{{ t('Return items') }}</Button>
         </template>
     </PageHeader>
@@ -98,8 +116,8 @@ async function submit(token: string | null = null) {
         </section>
         <aside class="panel p-3"><ReceiptView :receipt="receipt" /></aside>
     </div>
-    <div class="hidden print:block"><ReceiptView :receipt="{ ...receipt, reprint: true }" /></div>
-    <div v-if="lastNote" class="hidden print:block"><ReceiptView :receipt="lastNote.receipt" /></div>
+    <!-- Kept off screen; this is the copy that Reprint sends to the printer. -->
+    <div class="hidden"><div ref="reprintEl"><ReceiptView :receipt="{ ...receipt, reprint: true }" /></div></div>
 
     <Modal :open="returning" :title="t('Return items')" size="xl" @close="returning = false">
         <table class="table-base">
@@ -122,8 +140,18 @@ async function submit(token: string | null = null) {
         <template #footer><Button @click="returning = false">{{ t('Cancel') }}</Button><Button variant="primary" :loading="busy" @click="submit()">{{ t('Record return') }}</Button></template>
     </Modal>
     <Modal :open="!!lastNote" :title="t('Return recorded')" size="md" @close="lastNote = null">
-        <ReceiptView v-if="lastNote" :receipt="lastNote.receipt" />
-        <template #footer><Button @click="print"><Printer class="h-4 w-4" />{{ t('Print') }}</Button><Button variant="primary" @click="lastNote = null">{{ t('Done') }}</Button></template>
+        <div v-if="lastNote" ref="noteEl"><ReceiptView :receipt="lastNote.receipt" /></div>
+        <template #footer><Button @click="printElement(noteEl)"><Printer class="h-4 w-4" />{{ t('Print') }}</Button><Button variant="primary" @click="lastNote = null">{{ t('Done') }}</Button></template>
     </Modal>
     <PinApproval :open="approvalOpen" action="refund" @close="approvalOpen = false" @approved="(token: string) => { approvalOpen = false; submit(token); }" />
 </template>
+
+<!-- Not scoped on purpose: the printed copy lives under <body>, outside this component. -->
+<style>
+#print-root { display: none; }
+
+@media print {
+    body.printing-one > *:not(#print-root) { display: none !important; }
+    body.printing-one #print-root { display: block; }
+}
+</style>

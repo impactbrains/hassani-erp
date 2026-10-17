@@ -49,8 +49,7 @@ final class CheckoutService
         private readonly CreditControl $credit,
         private readonly SaleRecorder $recorder,
         private readonly \App\Domain\Catalog\UnlistedItems $unlisted,
-    ) {
-    }
+    ) {}
 
     /** @param array<string, mixed> $input validated CheckoutRequest data */
     public function checkout(User $user, array $input): SalesInvoice
@@ -60,7 +59,7 @@ final class CheckoutService
         }
 
         try {
-            return DB::transaction(fn () => $this->post($user, $input));
+            return DB::transaction(fn() => $this->post($user, $input));
         } catch (UniqueConstraintViolationException $e) {
             // A concurrent retry with the same key won the race; return its receipt.
             if ($existing = $this->existing($input['idempotency_key'])) {
@@ -84,14 +83,14 @@ final class CheckoutService
         $date = $register->store->businessDate();
         [$lines] = $this->buildLines($user, $register, $customer, $input['lines'], $date, dryRun: true);
         $pricing = $this->pricer->price(
-            array_map(fn (SaleLine $line, int $i) => $line->forPricer($i), $lines, array_keys($lines)),
+            array_map(fn(SaleLine $line, int $i) => $line->forPricer($i), $lines, array_keys($lines)),
             $this->cartDiscount($input),
             Settings::get('pricing.rounding_step', $register->store_id),
         );
 
         return $pricing + [
-            'unit_prices' => array_map(fn (SaleLine $l) => $l->unitPrice, $lines),
-            'list_prices' => array_map(fn (SaleLine $l) => $l->listPrice, $lines),
+            'unit_prices' => array_map(fn(SaleLine $l) => $l->unitPrice, $lines),
+            'list_prices' => array_map(fn(SaleLine $l) => $l->listPrice, $lines),
             'discount_needs_approval' => $this->discountNeedsApproval($user, $register->store_id, $pricing['max_discount_percent']),
         ];
     }
@@ -108,7 +107,7 @@ final class CheckoutService
         [$lines, $approvalIds] = $this->buildLines($user, $register, $customer, $input['lines'], $date, dryRun: false);
         $cartDiscount = $this->cartDiscount($input);
         $roundingStep = Settings::get('pricing.rounding_step', $store->id);
-        $pricing = $this->pricer->price(array_map(fn (SaleLine $l, int $i) => $l->forPricer($i), $lines, array_keys($lines)), $cartDiscount, $roundingStep);
+        $pricing = $this->pricer->price(array_map(fn(SaleLine $l, int $i) => $l->forPricer($i), $lines, array_keys($lines)), $cartDiscount, $roundingStep);
 
         if (Decimal::isPositive($pricing['discount_total'])) {
             if (! $user->hasPermission('pos.discount', $store->id)) {
@@ -126,14 +125,14 @@ final class CheckoutService
 
         if (isset($input['expected_total']) && ! Decimal::eq($input['expected_total'], $pricing['total'])) {
             throw new BusinessRuleException(
-                'The bill total changed to Rs '.$pricing['total'].' (prices or stock were updated). Check the cart and take payment again.',
+                'The bill total changed to Rs ' . $pricing['total'] . ' (prices or stock were updated). Check the cart and take payment again.',
                 'total_changed',
                 ['total' => $pricing['total']],
             );
         }
 
         $payments = $this->payments($input['payments'] ?? []);
-        $paid = Decimal::sum(array_map(fn (SalePayment $p) => $p->amount, $payments));
+        $paid = Decimal::sum(array_map(fn(SalePayment $p) => $p->amount, $payments));
         $creditAmount = Decimal::money(Decimal::sub($pricing['total'], $paid));
         $creditApproval = null;
         if (Decimal::isPositive($creditAmount)) {
@@ -169,7 +168,7 @@ final class CheckoutService
         ));
 
         $this->auditExceptions($user, $invoice, $input, $approvalIds, $creditApproval?->id);
-        $this->unlisted->recordSales($invoice, collect($input['lines'])->filter(fn ($l) => ! empty($l['description']) && ! empty($l['barcode']))->mapWithKeys(fn ($l) => ['*'.trim($l['description']) => $l['barcode']])->all());
+        $this->unlisted->recordSales($invoice, collect($input['lines'])->filter(fn($l) => ! empty($l['description']) && ! empty($l['barcode']))->mapWithKeys(fn($l) => ['*' . trim($l['description']) => $l['barcode']])->all());
 
         return $invoice;
     }
@@ -223,7 +222,7 @@ final class CheckoutService
                 $approvalId = $this->overrideApproval($user, $register->store_id, $raw, $dryRun);
             }
             if ($enforceMrp && $variant->mrp !== null && Decimal::gt($unitPrice, Decimal::mul($variant->mrp, $unit->factor))) {
-                throw new BusinessRuleException("{$variant->displayName()} cannot be sold above its printed price (MRP Rs ".Decimal::money(Decimal::mul($variant->mrp, $unit->factor)).').', 'above_mrp');
+                throw new BusinessRuleException("{$variant->displayName()} cannot be sold above its printed price (MRP Rs " . Decimal::money(Decimal::mul($variant->mrp, $unit->factor)) . ').', 'above_mrp');
             }
             if ($approvalId) {
                 $approvalIds[] = $approvalId;
@@ -267,9 +266,17 @@ final class CheckoutService
         $tax = $this->taxes->for($variant->product, $date);
 
         return new SaleLine(
-            variant: $variant, unit: $unit, quantity: $quantity, baseQuantity: $baseQuantity, listPrice: $price, unitPrice: $price,
-            taxRate: $tax['rate'], taxInclusive: $tax['inclusive'], discount: $this->lineDiscount($raw), discountReasonId: $raw['discount_reason_id'] ?? null,
-            description: '*'.$name,
+            variant: $variant,
+            unit: $unit,
+            quantity: $quantity,
+            baseQuantity: $baseQuantity,
+            listPrice: $price,
+            unitPrice: $price,
+            taxRate: $tax['rate'],
+            taxInclusive: $tax['inclusive'],
+            discount: $this->lineDiscount($raw),
+            discountReasonId: $raw['discount_reason_id'] ?? null,
+            description: '*' . $name,
         );
     }
 
@@ -318,9 +325,11 @@ final class CheckoutService
             }
             $cost = Decimal::mul($unitCost, $line->baseQuantity);
             $minimumRevenue = Decimal::add($cost, Decimal::percentOf($cost, $floor));
-            if (Decimal::lt($pricing['lines'][$index]['revenue_amount'], $minimumRevenue)
+            if (
+                Decimal::lt($pricing['lines'][$index]['revenue_amount'], $minimumRevenue)
                 && (Decimal::isPositive($pricing['lines'][$index]['line_discount']) || Decimal::isPositive($pricing['lines'][$index]['cart_discount_share']) || $line->priceOverridden())
-                && empty($input['discount_approval_token']) && $line->approvalId === null) {
+                && empty($input['discount_approval_token']) && $line->approvalId === null
+            ) {
                 throw new BusinessRuleException(
                     "{$line->variant->displayName()} would sell below cost plus the minimum margin. A manager must approve this discount.",
                     'approval_required',
@@ -406,8 +415,8 @@ final class CheckoutService
         if ($shift === null) {
             throw new BusinessRuleException('Open a shift on this POS counter before selling.', 'shift_not_open');
         }
-        if ($shift->opened_by !== $user->id) {
-            throw new BusinessRuleException('This POS counter\'s shift belongs to another cashier. Close it and open your own shift.', 'shift_other_cashier');
+        if ($shift->opened_by !== $user->id && ! $user->hasPermission('pos.shift.join', $register->store_id)) {
+            throw new BusinessRuleException('This POS counter\'s shift belongs to another cashier. Ask a manager to join it, or close it and open your own shift.', 'shift_other_cashier');
         }
 
         return $shift;
@@ -438,9 +447,9 @@ final class CheckoutService
     private function auditExceptions(User $user, SalesInvoice $invoice, array $input, array $approvalIds, ?int $creditApprovalId): void
     {
         foreach ($input['removed_lines'] ?? [] as $removed) {
-            Audit::record('pos.line_removed', 'Removed '.($removed['description'] ?? 'item').' x'.($removed['quantity'] ?? '?').' before payment', $invoice, new: $removed, storeId: $invoice->store_id);
+            Audit::record('pos.line_removed', 'Removed ' . ($removed['description'] ?? 'item') . ' x' . ($removed['quantity'] ?? '?') . ' before payment', $invoice, new: $removed, storeId: $invoice->store_id);
         }
-        if ($invoice->lines->contains(fn ($line) => $line->price_overridden)) {
+        if ($invoice->lines->contains(fn($line) => $line->price_overridden)) {
             Audit::record('pos.price_override', "Price override on {$invoice->number}", $invoice, new: ['approvals' => $approvalIds], storeId: $invoice->store_id);
         }
         if (Decimal::isPositive($invoice->discount_total)) {

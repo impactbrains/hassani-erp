@@ -119,7 +119,7 @@ export const ur2: Record<string, string> = {
     "Approve the refund": "واپسی منظور کریں",
     "Approve transfers": "منتقلی منظور کریں",
     "Approved": "منظور شدہ",
-    "Approved Peshgi is paid out, then recovered from salary in equal monthly instalments.": "منظور شدہ پیشگی ادا کی جاتی ہے، پھر تنخواہ سے برابر ماہانہ قسطوں میں وصول ہوتی ہے۔",
+    "Approved Peshgi is paid out, then recovered from salary in equal monthly installments.": "منظور شدہ پیشگی ادا کی جاتی ہے، پھر تنخواہ سے برابر ماہانہ قسطوں میں وصول ہوتی ہے۔",
     "Approved by": "منظور کنندہ",
     "Approved by :name": ":name نے منظور کیا",
     "Approved by manager": "منیجر نے منظور کیا",

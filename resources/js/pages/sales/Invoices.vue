@@ -11,16 +11,27 @@ const columns = [
     { key: 'number', label: 'Number' }, { key: 'business_date', label: 'Date', type: 'date' as const }, { key: 'customer_name', label: 'Customer' }, { key: 'cashier.name', label: 'Cashier' },
     { key: 'total', label: 'Total', type: 'money' as const }, { key: 'amount_paid', label: 'Paid', type: 'money' as const }, { key: 'amount_credited', label: 'Returned', type: 'money' as const }, { key: 'payment_status', label: 'Status', type: 'status' as const },
 ];
+
+/** Clicking anywhere on a row opens its receipt, not just the number. */
+function openRow(e: MouseEvent) {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    const target = e.target as HTMLElement;
+    // Real links and controls do their own thing; so does selecting text to copy it.
+    if (target.closest('a, button, input, select, textarea, label')) return;
+    if (window.getSelection()?.toString()) return;
+    target.closest('tbody tr')?.querySelector<HTMLAnchorElement>('a[href]')?.click();
+}
 </script>
 
 <template>
     <PageHeader :title="t('Receipts')" :subtitle="t('Find a receipt to reprint it or take a return.')" />
-    <div class="panel mb-4 flex flex-wrap gap-3 p-3">
+    <div class="panel mb-4 flex flex-wrap items-end gap-3 p-3">
         <input v-model="filters.q" type="search" class="input max-w-xs" :placeholder="t('Receipt number or customer')" />
         <select v-model="filters.payment_status" class="input max-w-[12rem]"><option value="">{{ t('Any payment status') }}</option><option value="paid">{{ t('paid') }}</option><option value="partial">{{ t('partial') }}</option><option value="unpaid">{{ t('unpaid') }}</option></select>
-        <input v-model="filters.from" type="date" class="input max-w-[11rem]" /><input v-model="filters.to" type="date" class="input max-w-[11rem]" />
+        <label><span class="field-label">{{ t('From date') }}</span><input v-model="filters.from" type="date" class="input max-w-[11rem]" /></label>
+        <label><span class="field-label">{{ t('To date') }}</span><input v-model="filters.to" type="date" class="input max-w-[11rem]" /></label>
     </div>
-    <section class="panel">
+    <section class="panel [&_tbody_tr:has(a)]:cursor-pointer" @click="openRow">
         <DataTable :columns="columns" :rows="invoices.data.map((r: any) => ({ ...r, customer_name: r.customer_name ?? t('Walk-in') }))" :row-href="(r) => route('sales.invoices.show', r.id)" empty="No receipts found." />
         <Pagination :meta="invoices" />
     </section>

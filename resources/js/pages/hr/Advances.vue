@@ -43,7 +43,7 @@ function save() {
 </script>
 
 <template>
-    <PageHeader :title="t('Peshgi (salary advances)')" :subtitle="t('Approved Peshgi is paid out, then recovered from salary in equal monthly instalments.')">
+    <PageHeader :title="t('Peshgi (salary advances)')" :subtitle="t('Approved Peshgi is paid out, then recovered from salary in equal monthly installments.')">
         <template #actions><Button variant="primary" @click="asking = true">{{ t('Request Peshgi') }}</Button></template>
     </PageHeader>
     <section class="panel">

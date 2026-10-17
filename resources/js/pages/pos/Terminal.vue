@@ -21,33 +21,68 @@ import { localName, t } from '@/lib/i18n';
  * plus Enter into the search box, which is always focused. The browser
  * keeps a proposed cart; the server re-prices it (quote) and posts the sale.
  *
- * Keys: F2 search · F4 customer · F6 discount · F8 hold · F9 pay · Esc close.
+ * Several carts can be open at once, one tab per customer. Switching tabs
+ * keeps every cart exactly as it was (no hold / resume needed).
+ *
+ * Keys: F2 search · F3 new cart · F4 customer · F6 discount · F7/F8 previous/next cart
+ *       · Alt+1..9 jump to a cart · F9 pay · Esc close.
  */
 const props = defineProps<{ store: any; registers: any[]; shift: any | null; paymentMethods: any[]; reasons: Record<string, any[]>; settings: any; can: Record<string, boolean>; unlistedItem: any }>();
 const page = usePage<any>();
 
 interface Line { description?: string; barcode?: string | null; unlisted?: boolean; key: string; variant_id: number; name: string; name_ur: string | null; sku: string; units: any[]; variant_unit_id: number; quantity: string; unit_price: string | null; price_token: string | null; discount: { type: 'amount' | 'percent'; value: string } | null; available: string }
+type Discount = { type: 'amount' | 'percent'; value: string };
+/** Everything that belongs to one customer's sale. One of these per tab. */
+interface Cart {
+    id: string;
+    number: number;
+    lines: Line[];
+    removed: any[];
+    selected: number;
+    customer: any | null;
+    cartDiscount: Discount | null;
+    quote: any | null;
+    quoteError: string | null;
+    tokens: { discount?: string; credit?: string };
+    idempotencyKey: string;
+    quoteSeq: number;
+}
 
 const shift = ref<any | null>(props.shift);
-const lines = ref<Line[]>([]);
-const removed = ref<any[]>([]);
-const selected = ref<number>(-1);
-const customer = ref<any | null>(null);
-const cartDiscount = ref<{ type: 'amount' | 'percent'; value: string } | null>(null);
-const quote = ref<any | null>(null);
-const quoteError = ref<string | null>(null);
+
+// ---------- carts (one tab per customer) ----------
+const carts = ref<Cart[]>([]);
+const activeId = ref('');
+function makeCart(number: number): Cart {
+    return { id: uuid(), number, lines: [], removed: [], selected: -1, customer: null, cartDiscount: null, quote: null, quoteError: null, tokens: {}, idempotencyKey: uuid(), quoteSeq: 0 };
+}
+carts.value = [makeCart(1)];
+activeId.value = carts.value[0].id;
+const activeCart = computed<Cart>(() => carts.value.find((c) => c.id === activeId.value) ?? carts.value[0]);
+
+// The rest of the screen works on "the current cart". These point at the active tab, so
+// reading or assigning them (lines.value.push, customer.value = x ...) changes that tab only.
+const lines = computed<Line[]>({ get: () => activeCart.value.lines, set: (v) => { activeCart.value.lines = v; } });
+const removed = computed<any[]>({ get: () => activeCart.value.removed, set: (v) => { activeCart.value.removed = v; } });
+const selected = computed<number>({ get: () => activeCart.value.selected, set: (v) => { activeCart.value.selected = v; } });
+const customer = computed<any | null>({ get: () => activeCart.value.customer, set: (v) => { activeCart.value.customer = v; } });
+const cartDiscount = computed<Discount | null>({ get: () => activeCart.value.cartDiscount, set: (v) => { activeCart.value.cartDiscount = v; } });
+const quote = computed<any | null>({ get: () => activeCart.value.quote, set: (v) => { activeCart.value.quote = v; } });
+const quoteError = computed<string | null>({ get: () => activeCart.value.quoteError, set: (v) => { activeCart.value.quoteError = v; } });
+const tokens = computed<{ discount?: string; credit?: string }>({ get: () => activeCart.value.tokens, set: (v) => { activeCart.value.tokens = v; } });
+
 const search = ref('');
 const results = ref<any[]>([]);
 const searching = ref(false);
 const searchInput = ref<HTMLInputElement | null>(null);
 const customerPicker = ref<any>(null);
-const tokens = ref<{ discount?: string; credit?: string }>({});
-const idempotencyKey = ref(uuid());
 
 const modal = ref<null | 'unlisted' | 'pay' | 'receipt' | 'held' | 'recent' | 'cash' | 'x' | 'close' | 'discount' | 'price' | 'camera'>(null);
 const busy = ref(false);
 const payError = ref<string | null>(null);
 const receipt = ref<any | null>(null);
+// 'sale' = the receipt of the sale just made (closing it finishes the cart); 'reprint' = an old receipt (closing it touches nothing).
+const receiptKind = ref<'sale' | 'reprint'>('sale');
 // Receipt language for this POS screen: starts from the store setting, the cashier can switch it.
 const receiptLang = ref<'en' | 'ur' | 'both'>(readReceiptLang() ?? props.settings.receipt_language ?? 'en');
 function readReceiptLang(): 'en' | 'ur' | 'both' | null {
@@ -65,8 +100,86 @@ function setReceiptLang(value: 'en' | 'ur' | 'both') {
         /* private window: keep it for this session only */
     }
 }
+// True while the customer picker's "Add a customer" popup is open: no tab switching or shortcuts meanwhile.
+const pickerDialog = ref(false);
+function onPickerDialog(open: boolean) {
+    pickerDialog.value = open;
+    if (!open) focusSearch();
+}
 const approval = ref<{ action: string; reason?: string; resolve: (token: string | null) => void } | null>(null);
 const toasts = ref<any>(null);
+
+// ---------- cart tabs ----------
+const cartIsEmpty = (c: Cart) => !c.lines.length && !c.customer;
+const cartHasItems = computed(() => carts.value.some((c) => c.lines.length > 0));
+function tabLabel(c: Cart): string {
+    return (c.customer && localName(c.customer)) || `${t('Cart')} ${c.number}`;
+}
+function nextCartNumber(): number {
+    const used = new Set(carts.value.map((c) => c.number));
+    let n = 1;
+    while (used.has(n)) n++;
+    return n;
+}
+function openBlankTab() {
+    const c = makeCart(nextCartNumber());
+    carts.value.push(c);
+    activeId.value = c.id;
+    search.value = '';
+    results.value = [];
+    focusSearch();
+}
+function addTab() {
+    if (modal.value || busy.value || pickerDialog.value) return;
+    // An untouched empty cart is already a "new cart": go to it instead of piling up blank tabs.
+    const blank = carts.value.find(cartIsEmpty);
+    if (blank) return switchTab(blank.id);
+    openBlankTab();
+}
+function switchTab(id: string) {
+    if (id === activeId.value || modal.value || busy.value || pickerDialog.value) return;
+    activeId.value = id;
+    search.value = '';
+    results.value = [];
+    focusSearch();
+}
+function stepTab(direction: number) {
+    const i = carts.value.findIndex((c) => c.id === activeId.value);
+    const next = carts.value[(i + direction + carts.value.length) % carts.value.length];
+    if (next) switchTab(next.id);
+}
+/** Remove a tab. If it was the last one, a fresh empty cart takes its place. */
+function removeTab(id: string) {
+    const index = carts.value.findIndex((c) => c.id === id);
+    if (index < 0) return;
+    carts.value[index].quoteSeq++;
+    carts.value.splice(index, 1);
+    if (!carts.value.length) {
+        const c = makeCart(1);
+        carts.value.push(c);
+        activeId.value = c.id;
+    } else if (activeId.value === id) {
+        activeId.value = carts.value[Math.min(index, carts.value.length - 1)].id;
+    }
+    search.value = '';
+    results.value = [];
+    focusSearch();
+}
+const logVoid = (c: Cart) => post(route('pos.void-log'), { lines: c.lines.map((l) => ({ description: l.name, quantity: l.quantity })) }).catch(() => null);
+async function closeTab(id: string) {
+    if (modal.value || busy.value || pickerDialog.value) return;
+    const cart = carts.value.find((c) => c.id === id);
+    if (!cart) return;
+    if (cart.lines.length) {
+        if (!confirm(t('Close this cart without a sale?'))) return;
+        await logVoid(cart);
+    }
+    removeTab(id);
+}
+function resetCart(c: Cart) {
+    c.quoteSeq++;
+    Object.assign(c, { lines: [], removed: [], selected: -1, customer: null, cartDiscount: null, quote: null, quoteError: null, tokens: {}, idempotencyKey: uuid() });
+}
 
 const units = (l: Line) => l.units.find((u) => u.id === l.variant_unit_id);
 const listPrice = (l: Line, i: number) => quote.value?.list_prices?.[i] ?? units(l)?.price ?? null;
@@ -80,6 +193,20 @@ async function openShift() {
     busy.value = true;
     try {
         shift.value = await post(route('pos.shifts.open'), openForm.value);
+        focusSearch();
+    } catch (e) {
+        notify('error', (e as Error).message);
+    } finally {
+        busy.value = false;
+    }
+}
+
+const pickedRegister = computed(() => props.registers.find((r) => r.id === openForm.value.register_id));
+const joining = computed(() => !!props.can.join && !!pickedRegister.value?.busy_with);
+async function joinShift() {
+    busy.value = true;
+    try {
+        shift.value = await post(route('pos.shifts.join'), { register_id: openForm.value.register_id });
         focusSearch();
     } catch (e) {
         notify('error', (e as Error).message);
@@ -171,7 +298,6 @@ function addUnlisted() {
 
 // ---------- server pricing ----------
 let quoteTimer: ReturnType<typeof setTimeout> | undefined;
-let quoteSeq = 0;
 watch([lines, cartDiscount, customer], () => {
     clearTimeout(quoteTimer);
     if (!lines.value.length) { quote.value = null; quoteError.value = null; return; }
@@ -179,29 +305,31 @@ watch([lines, cartDiscount, customer], () => {
 }, { deep: true });
 
 async function refreshQuote() {
-    const seq = ++quoteSeq;
+    // Remember which cart this answer is for: the cashier may switch tabs while the server is thinking.
+    const cart = activeCart.value;
+    const seq = ++cart.quoteSeq;
     try {
-        const result = await post(route('pos.quote'), payload(false));
-        if (seq === quoteSeq) { quote.value = result; quoteError.value = null; }
+        const result = await post(route('pos.quote'), buildPayload(cart, false));
+        if (seq === cart.quoteSeq) { cart.quote = result; cart.quoteError = null; }
     } catch (e) {
-        if (seq === quoteSeq) quoteError.value = (e as Error).message;
+        if (seq === cart.quoteSeq) cart.quoteError = (e as Error).message;
     }
 }
 
-function payload(withPayment: boolean, payments: any[] = []) {
+function buildPayload(cart: Cart, withPayment: boolean, payments: any[] = []) {
     return {
-        idempotency_key: idempotencyKey.value,
+        idempotency_key: cart.idempotencyKey,
         register_id: shift.value?.register_id,
-        customer_id: customer.value?.id ?? null,
-        lines: lines.value.map((l) => ({
+        customer_id: cart.customer?.id ?? null,
+        lines: cart.lines.map((l) => ({
             variant_id: l.variant_id, variant_unit_id: l.variant_unit_id, quantity: l.quantity, unit_price: l.unit_price,
             price_approval_token: l.price_token, discount: l.discount && l.discount.value !== '' ? l.discount : null,
             description: l.unlisted ? l.description : null, barcode: l.unlisted ? l.barcode : null,
         })),
-        cart_discount: cartDiscount.value && cartDiscount.value.value !== '' ? cartDiscount.value : null,
+        cart_discount: cart.cartDiscount && cart.cartDiscount.value !== '' ? cart.cartDiscount : null,
         ...(withPayment ? {
-            payments, expected_total: total.value, removed_lines: removed.value,
-            discount_approval_token: tokens.value.discount ?? null, credit_approval_token: tokens.value.credit ?? null,
+            payments, expected_total: cart.quote?.total ?? '0.00', removed_lines: cart.removed,
+            discount_approval_token: cart.tokens.discount ?? null, credit_approval_token: cart.tokens.credit ?? null,
         } : {}),
     };
 }
@@ -235,11 +363,13 @@ async function openPay() {
 }
 
 async function pay(payments: any[]) {
+    const cart = activeCart.value;
     busy.value = true;
     payError.value = null;
     try {
-        const result = await post(route('pos.checkout'), payload(true, payments));
+        const result = await post(route('pos.checkout'), buildPayload(cart, true, payments));
         receipt.value = result.receipt;
+        receiptKind.value = 'sale';
         modal.value = 'receipt';
         if (props.settings.auto_print) nextTick(() => printReceipt());
     } catch (e) {
@@ -248,8 +378,8 @@ async function pay(payments: any[]) {
             const reason = action === 'credit_limit' ? (e.details.reasons ?? []).join('; ') : e.message;
             const token = await askApproval(action, reason);
             if (token) {
-                if (action === 'credit_limit') tokens.value.credit = token;
-                if (action === 'discount') tokens.value.discount = token;
+                if (action === 'credit_limit') cart.tokens.credit = token;
+                if (action === 'discount') cart.tokens.discount = token;
                 busy.value = false;
                 return pay(payments);
             }
@@ -262,24 +392,27 @@ async function pay(payments: any[]) {
     }
 }
 
-function newSale() {
-    lines.value = [];
-    removed.value = [];
-    customer.value = null;
-    cartDiscount.value = null;
-    quote.value = null;
-    tokens.value = {};
+/** The sale is done: close its tab (or start a fresh empty cart if it was the only one). */
+function finishSale() {
     receipt.value = null;
-    idempotencyKey.value = uuid();
+    modal.value = null;
+    removeTab(activeId.value);
+}
+function closeReceipt() {
+    if (receiptKind.value === 'sale') return finishSale();
+    // A reprint of an old receipt must never touch the cart that is being rung up.
+    receipt.value = null;
     modal.value = null;
     focusSearch();
 }
 
 async function clearCart() {
-    if (!lines.value.length) return;
+    const cart = activeCart.value;
+    if (!cart.lines.length) return;
     if (!confirm(t('Clear this cart without a sale?'))) return;
-    await post(route('pos.void-log'), { lines: lines.value.map((l) => ({ description: l.name, quantity: l.quantity })) }).catch(() => null);
-    newSale();
+    await logVoid(cart);
+    resetCart(cart);
+    focusSearch();
 }
 
 // ---------- printing (80 mm thermal; the printer driver opens the cash drawer) ----------
@@ -321,32 +454,24 @@ function saveDiscount() {
     focusSearch();
 }
 
-// ---------- hold / resume ----------
+// ---------- carts that were put on hold earlier ----------
+// New carts no longer need holding (use a tab). This list only lets the cashier pick up carts
+// that were held before, each one opening in its own tab.
 const heldCarts = ref<any[]>([]);
-async function hold() {
-    if (!lines.value.length) return;
-    const label = prompt(t('Name for this cart (optional)')) ?? undefined;
-    try {
-        await post(route('pos.hold'), { register_id: shift.value.register_id, cart: { lines: lines.value, cartDiscount: cartDiscount.value, customer: customer.value }, label, customer_id: customer.value?.id ?? null, estimated_total: total.value });
-        notify('success', t('Cart held.'));
-        newSale();
-    } catch (e) {
-        notify('error', (e as Error).message);
-    }
-}
 async function showHeld() {
     heldCarts.value = await get(route('pos.held'));
     modal.value = 'held';
 }
 async function resume(id: number) {
-    if (lines.value.length && !confirm(t('The current cart will be replaced. Continue?'))) return;
     try {
         const res = await post(route('pos.resume', id));
-        newSale();
+        // Open it in its own tab (re-use the current one if it is still empty).
+        if (!cartIsEmpty(activeCart.value)) openBlankTab();
         lines.value = res.cart.lines ?? [];
         cartDiscount.value = res.cart.cartDiscount ?? null;
         customer.value = res.cart.customer ?? null;
         lines.value.forEach((l) => (l.price_token = null));
+        focusSearch();
     } catch (e) {
         notify('error', (e as Error).message);
     }
@@ -365,6 +490,7 @@ async function showRecent() {
 }
 async function reprint(id: number) {
     receipt.value = await get(route('pos.receipt', id));
+    receiptKind.value = 'reprint';
     modal.value = 'receipt';
     nextTick(() => printReceipt());
 }
@@ -396,7 +522,7 @@ async function showX() {
 const closeForm = ref({ denominations: {} as Record<string, number>, note: '', approval_token: null as string | null });
 const zResult = ref<any | null>(null);
 async function closeShift() {
-    if (lines.value.length) return notify('error', t('Finish or hold the current cart first.'));
+    if (cartHasItems.value) return notify('error', t('Finish or close all open carts first.'));
     busy.value = true;
     try {
         zResult.value = await post(route('pos.shifts.close', shift.value.id), closeForm.value);
@@ -430,13 +556,21 @@ function focusSearch() {
     nextTick(() => searchInput.value?.focus());
 }
 function onKey(e: KeyboardEvent) {
-    if (approval.value) return;
+    if (approval.value || pickerDialog.value) return;
     if (e.key === 'F2') { e.preventDefault(); focusSearch(); }
     if (e.key === 'F4') { e.preventDefault(); customerPicker.value?.focus(); }
     if (e.key === 'F6' && props.can.discount) { e.preventDefault(); editDiscount(null); }
-    if (e.key === 'F8' && props.can.hold) { e.preventDefault(); hold(); }
     if (e.key === 'F9') { e.preventDefault(); if (!modal.value) openPay(); }
-    if (e.key === 'Enter' && modal.value === 'receipt') { e.preventDefault(); newSale(); }
+    if (e.key === 'Enter' && modal.value === 'receipt') { e.preventDefault(); closeReceipt(); }
+    if (shift.value && !modal.value && !busy.value) {
+        if (e.key === 'F3') { e.preventDefault(); addTab(); }
+        if (e.key === 'F7') { e.preventDefault(); stepTab(-1); }
+        if (e.key === 'F8') { e.preventDefault(); stepTab(1); }
+        if (e.altKey && !e.ctrlKey && /^[1-9]$/.test(e.key)) {
+            const target = carts.value[Number(e.key) - 1];
+            if (target) { e.preventDefault(); switchTab(target.id); }
+        }
+    }
     if (!modal.value && document.activeElement === searchInput.value && !search.value && selected.value >= 0) {
         if (e.key === '+' ) { e.preventDefault(); changeQty(selected.value, 1); }
         if (e.key === '-') { e.preventDefault(); changeQty(selected.value, -1); }
@@ -449,7 +583,7 @@ function notify(kind: 'success' | 'error', text: string) {
     toasts.value?.push(kind, text);
 }
 function guardUnload(e: BeforeUnloadEvent) {
-    if (lines.value.length) e.preventDefault();
+    if (cartHasItems.value) e.preventDefault();
 }
 onMounted(() => {
     window.addEventListener('keydown', onKey);
@@ -476,7 +610,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
             <div class="h-6 w-px bg-white/15" />
             <div class="leading-tight">
                 <div class="text-sm font-semibold">{{ localName(store) }}</div>
-                <div class="text-[12px] text-ink-300"><template v-if="shift">{{ shift.register }} · {{ t('Shift') }} {{ shift.number }}</template><template v-else>{{ t('No shift open') }}</template> · {{ page.props.auth.user.name }}</div>
+                <div class="text-[12px] text-ink-300"><template v-if="shift">{{ shift.register }} · {{ t('Shift') }} {{ shift.number }}<template v-if="shift.joined"> · {{ t('opened by :name', { name: shift.opener }) }}</template></template><template v-else>{{ t('No shift open') }}</template> · {{ page.props.auth.user.name }}</div>
             </div>
             <div v-if="shift" class="ms-auto flex items-center gap-1 text-sm">
                 <button v-if="can.hold" class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="showHeld"><PauseCircle class="h-4 w-4" />{{ t('Held carts') }}</button>
@@ -488,19 +622,39 @@ onBeforeUnmount(() => clearInterval(clockTimer));
             <div class="ms-2 text-sm tabular-nums text-ink-300">{{ clock.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Karachi' }) }}</div>
         </header>
 
+        <!-- Cart tabs: one per customer -->
+        <nav v-if="shift" class="flex shrink-0 items-end gap-1 overflow-x-auto bg-ink-800 px-3 pt-2" role="tablist" :aria-label="t('Open carts')">
+            <div
+                v-for="(c, i) in carts"
+                :key="c.id"
+                class="flex max-w-[17rem] shrink-0 items-center rounded-t-lg text-sm"
+                :class="c.id === activeId ? 'bg-white text-ink-900' : 'bg-white/5 text-ink-200 hover:bg-white/10'"
+            >
+                <button type="button" role="tab" :aria-selected="c.id === activeId" class="flex min-w-0 items-center gap-2 py-2 ps-3 pe-2" :title="`Alt+${i + 1}`" @click="switchTab(c.id)">
+                    <UserRound class="h-4 w-4 shrink-0" />
+                    <span class="truncate font-medium">{{ tabLabel(c) }}</span>
+                    <span v-if="c.lines.length" class="shrink-0 rounded-full px-1.5 text-[12px] tabular-nums" :class="c.id === activeId ? 'bg-ink-900/10' : 'bg-white/15'">{{ c.lines.length }}</span>
+                    <span v-if="c.lines.length && c.quote" class="shrink-0 text-[12.5px] tabular-nums opacity-80">{{ money(c.quote.total) }}</span>
+                </button>
+                <button v-if="carts.length > 1" type="button" class="me-1.5 rounded p-1 opacity-60 hover:bg-black/10 hover:opacity-100" :aria-label="t('Close cart')" :title="t('Close cart')" @click="closeTab(c.id)"><X class="h-3.5 w-3.5" /></button>
+                <span v-else class="pe-2" />
+            </div>
+            <button type="button" class="mb-1 ms-1 flex shrink-0 items-center gap-1 rounded px-2.5 py-1.5 text-sm text-ink-200 hover:bg-white/10" :title="`${t('New cart')} (F3)`" @click="addTab"><Plus class="h-4 w-4" />{{ t('New cart') }}</button>
+        </nav>
+
         <!-- Open shift first -->
         <main v-if="!shift" class="flex flex-1 items-start justify-center overflow-auto p-6">
             <div class="panel w-full max-w-xl p-6">
-                <h1>{{ t('Open shift') }}</h1>
-                <p class="mt-1 text-sm text-ink-500">{{ t('Count the cash in the drawer before the first sale. This is your opening cash.') }}</p>
+                <h1>{{ joining ? t('Join open shift') : t('Open shift') }}</h1>
+                <p class="mt-1 text-sm text-ink-500">{{ joining ? t(':name opened this counter. You will sell on the same shift and the same cash drawer, and every sale still shows your name.', { name: pickedRegister?.busy_with }) : t('Count the cash in the drawer before the first sale. This is your opening cash.') }}</p>
                 <label class="mt-5 block">
                     <span class="field-label">{{ t('POS counter') }}</span>
                     <select v-model="openForm.register_id" class="input">
-                        <option v-for="r in registers" :key="r.id" :value="r.id" :disabled="!!r.busy_with">{{ r.name }}{{ r.busy_with ? ` — ${t('in use by')} ${r.busy_with}` : '' }}</option>
+                        <option v-for="r in registers" :key="r.id" :value="r.id" :disabled="!!r.busy_with && !can.join">{{ r.name }}{{ r.busy_with ? ` — ${t('in use by')} ${r.busy_with}` : '' }}</option>
                     </select>
                 </label>
-                <div class="mt-5"><DenominationCount v-model="openForm.denominations" :denominations="settings.denominations" /></div>
-                <Button variant="primary" size="lg" class="mt-6 w-full" :loading="busy" @click="openShift">{{ t('Open shift') }}</Button>
+                <div v-if="!joining" class="mt-5"><DenominationCount v-model="openForm.denominations" :denominations="settings.denominations" /></div>
+                <Button variant="primary" size="lg" class="mt-6 w-full" :loading="busy" @click="joining ? joinShift() : openShift()">{{ joining ? t('Join shift') : t('Open shift') }}</Button>
             </div>
         </main>
 
@@ -585,7 +739,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
                     <div v-else class="flex h-full flex-col items-center justify-center gap-2 p-10 text-center text-ink-500">
                         <ScanLine class="h-12 w-12 text-ink-200" />
                         <p class="text-base">{{ t('Scan the first item to start a sale.') }}</p>
-                        <p class="text-sm">{{ t('F2 search · F4 customer · F6 bill discount · F8 hold · F9 pay') }}</p>
+                        <p class="text-sm">{{ t('F2 search · F3 new cart · F4 customer · F6 bill discount · F7/F8 switch cart · F9 pay') }}</p>
                     </div>
                 </div>
             </section>
@@ -594,7 +748,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
             <aside class="flex min-h-0 flex-col bg-ink-800 text-white">
                 <div class="space-y-2 border-b border-white/10 p-4">
                     <div class="flex items-center gap-2 text-[13px] text-ink-200"><UserRound class="h-4 w-4" />{{ t('Customer') }} <span class="text-ink-400">(F4)</span></div>
-                    <ContactPicker ref="customerPicker" v-model="customer" type="customer" dark :placeholder="t('Walk-in customer — search to add Khata')" />
+                    <ContactPicker ref="customerPicker" v-model="customer" type="customer" dark :placeholder="t('Walk-in customer — search to add Khata')" :create-route="can.add_customer === false ? undefined : 'pos.customers.store'" @dialog="onPickerDialog" />
                     <div v-if="customer && customer.credit_limit !== undefined" class="flex justify-between text-[13px] text-ink-200">
                         <span>{{ t('Khata limit') }} {{ money(customer.credit_limit) }}</span>
                         <Badge v-if="customer.credit_status && customer.credit_status !== 'active'" :status="customer.credit_status" />
@@ -621,11 +775,8 @@ onBeforeUnmount(() => clearInterval(clockTimer));
                         <span class="pb-1 text-ink-200">{{ t('Total') }}</span>
                         <span class="text-[3.25rem] font-semibold leading-none tracking-tight tabular-nums text-haldi-400">{{ money(total) }}</span>
                     </div>
-                    <div class="mt-4 grid grid-cols-[1fr_2fr] gap-2">
-                        <div class="grid grid-cols-2 gap-2">
-                            <Button v-if="can.hold" variant="ink" size="lg" class="!bg-white/10 hover:!bg-white/20" :title="t('Hold (F8)')" :disabled="!lines.length" @click="hold"><PauseCircle class="h-5 w-5" /></Button>
-                            <Button variant="ink" size="lg" class="!bg-white/10 hover:!bg-ledger-red" :title="t('Clear cart')" :disabled="!lines.length" @click="clearCart"><X class="h-5 w-5" /></Button>
-                        </div>
+                    <div class="mt-4 grid grid-cols-[1fr_3fr] gap-2">
+                        <Button variant="ink" size="lg" class="!bg-white/10 hover:!bg-ledger-red" :title="t('Clear cart')" :disabled="!lines.length" @click="clearCart"><X class="h-5 w-5" /></Button>
                         <Button variant="primary" size="lg" class="h-14 text-lg" :disabled="!lines.length || !!quoteError" @click="openPay">{{ t('Pay') }} <kbd class="rounded bg-ink-900/10 px-1.5 text-[12px]">F9</kbd></Button>
                     </div>
                 </div>
@@ -639,9 +790,9 @@ onBeforeUnmount(() => clearInterval(clockTimer));
 
     <PaymentDialog :open="modal === 'pay'" :total="total" :methods="paymentMethods" :customer="customer" :can-credit="can.credit" :busy="busy" :error="payError" @close="modal = null; focusSearch()" @pay="pay" />
 
-    <Modal :open="modal === 'receipt'" :title="t('Sale complete')" size="md" @close="newSale">
+    <Modal :open="modal === 'receipt'" :title="receiptKind === 'sale' ? t('Sale complete') : t('Receipt')" size="md" @close="closeReceipt">
         <div v-if="receipt" class="flex flex-col items-center gap-4">
-            <div v-if="receipt.payments?.some((p: any) => Number(p.change) > 0)" class="w-full rounded-lg bg-ledger-greenSoft px-4 py-3 text-center">
+            <div v-if="receiptKind === 'sale' && receipt.payments?.some((p: any) => Number(p.change) > 0)" class="w-full rounded-lg bg-ledger-greenSoft px-4 py-3 text-center">
                 <div class="text-sm text-ledger-green">{{ t('Change to give') }}</div>
                 <div class="text-4xl font-semibold tabular-nums text-ledger-green">{{ money(receipt.payments.reduce((s: number, p: any) => s + Number(p.change || 0), 0)) }}</div>
             </div>
@@ -655,7 +806,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
         </div>
         <template #footer>
             <Button @click="printReceipt"><Printer class="h-4 w-4" />{{ t('Print receipt') }}</Button>
-            <Button variant="primary" size="lg" @click="newSale">{{ t('New sale') }} <kbd class="rounded bg-ink-900/10 px-1.5 text-[11px]">Enter</kbd></Button>
+            <Button variant="primary" size="lg" @click="closeReceipt">{{ receiptKind === 'sale' ? t('New sale') : t('Done') }} <kbd class="rounded bg-ink-900/10 px-1.5 text-[11px]">Enter</kbd></Button>
         </template>
     </Modal>
 

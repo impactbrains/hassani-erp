@@ -32,6 +32,7 @@ final class PermissionRegistry
                 'pos.refund.approve' => ['label' => 'Approve refunds above the threshold'],
                 'pos.hold' => ['label' => 'Hold and resume carts'],
                 'pos.shift.open' => ['label' => 'Open a cash shift'],
+                'pos.shift.join' => ['label' => 'Join a existing cash shift'],
                 'pos.shift.close' => ['label' => 'Close a cash shift (Z-Report)'],
                 'pos.shift.view_all' => ['label' => 'See every cashier\'s shifts'],
                 'pos.shift.approve_variance' => ['label' => 'Approve cash shortages and overages', 'sensitive' => true],

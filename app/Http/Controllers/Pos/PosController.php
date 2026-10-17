@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Pos;
 use App\Domain\Pos\CheckoutService;
 use App\Domain\Pos\HeldCartService;
 use App\Domain\Pos\ReceiptData;
+use App\Exceptions\BusinessRuleException;
 use App\Http\Controllers\Controller;
 use App\Models\HeldCart;
 use App\Models\PaymentMethod;
@@ -55,7 +56,38 @@ class PosController extends Controller
                 'discount' => $can('pos.discount'), 'approve_discount' => $can('pos.discount.approve'), 'override_price' => $can('pos.price.override'),
                 'credit' => $can('pos.sell_on_credit'), 'refund' => $can('pos.refund'), 'hold' => $can('pos.hold'), 'payout' => $can('pos.cash.payout'),
                 'drop' => $can('pos.cash.drop'), 'close' => $can('pos.shift.close'), 'collect' => $can('sales.payments.receive'),
+                'join' => $can('pos.shift.join'),
             ],
+        ]);
+    }
+
+    /**
+     * Steps into a counter that already has an open shift. Nothing is counted or
+     * opened: the drawer belongs to the shift that is already running, and sales
+     * made from here are posted on it under the joiner's own name. Allowed for
+     * whoever opened the shift, or anyone who may sell and holds pos.shift.join.
+     */
+    public function join(Request $request): JsonResponse
+    {
+        $data = $request->validate(['register_id' => ['required', 'integer']]);
+        $user = $request->user();
+        $store = $this->currentStore($request);
+        $this->allow($request, 'pos.sell', $store->id);
+
+        $shift = Shift::query()->where('store_id', $store->id)->where('register_id', (int) $data['register_id'])->where('status', 'open')
+            ->with(['register:id,name', 'opener:id,name'])->first();
+        if ($shift === null) {
+            throw new BusinessRuleException('That counter has no open shift to join. Open a shift on it instead.', 'shift_not_open');
+        }
+        $joined = $shift->opened_by !== $user->id;
+        if ($joined) {
+            $this->allow($request, 'pos.shift.join', $store->id);
+            Audit::record('pos.shift_joined', "Joined {$shift->number} on {$shift->register?->name}, opened by {$shift->opener?->name}", $shift, storeId: $store->id);
+        }
+
+        return response()->json([
+            'id' => $shift->id, 'number' => $shift->number, 'register_id' => $shift->register_id, 'register' => $shift->register?->name,
+            'opened_at' => $shift->opened_at, 'joined' => $joined, 'opener' => $shift->opener?->name,
         ]);
     }
 
