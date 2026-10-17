@@ -2,41 +2,37 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Location extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'name',
-        'type',
-        'address',
-        'is_default',
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'is_sellable' => 'boolean',
+        'is_default_receiving' => 'boolean',
+        'is_default_selling' => 'boolean',
+        'is_active' => 'boolean',
+        'capacity_units' => 'decimal:3',
     ];
 
-    protected function casts(): array
+    public function store(): BelongsTo
     {
-        return [
-            'is_default' => 'boolean',
-        ];
+        return $this->belongsTo(Store::class);
     }
 
-    public function stockMovements(): HasMany
+    public function parent(): BelongsTo
     {
-        return $this->hasMany(StockMovement::class);
+        return $this->belongsTo(Location::class, 'parent_id');
     }
 
-    /**
-     * Current stock on hand for a given variant at this location,
-     * computed live from the movement ledger.
-     */
-    public function stockOnHand(int $variantId): float
+    public function children(): HasMany
     {
-        return (float) $this->stockMovements()
-            ->where('variant_id', $variantId)
-            ->sum('quantity_change');
+        return $this->hasMany(Location::class, 'parent_id');
     }
 }

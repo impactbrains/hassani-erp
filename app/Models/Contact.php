@@ -2,157 +2,122 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
+/**
+ * A party the business deals with: customer, supplier, employee or job
+ * candidate. Type-specific data lives in customer_profiles,
+ * supplier_profiles and employee_details. A customer's Khata balance is
+ * never stored here; it is read from the accounts-receivable ledger.
+ */
 class Contact extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'user_id',
-        'type',
-        'previous_type',
-        'track',
-        'stage',
-        'application_notes',
-        'applied_at',
-        'name',
-        'email',
-        'phone',
-        'address',
-        'city',
-        'tax_number',
-        'is_active',
+    public const TYPE_CUSTOMER = 'customer';
+
+    public const TYPE_SUPPLIER = 'supplier';
+
+    public const TYPE_EMPLOYEE = 'employee';
+
+    public const TYPE_CANDIDATE = 'candidate';
+
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'is_active' => 'boolean',
+        'meta' => 'array',
+        'custom_field_answers' => 'array',
+        'applied_at' => 'datetime',
     ];
 
-    protected function casts(): array
+    protected static function booted(): void
     {
-        return [
-            'is_active' => 'boolean',
-            'applied_at' => 'datetime',
-        ];
-    }
-
-    public function documents(): HasMany
-    {
-        return $this->hasMany(Document::class, 'contact_id');
-    }
-
-    public function records(): HasMany
-    {
-        return $this->hasMany(ContactRecord::class);
-    }
-
-    public function scopeCustomers($query)
-    {
-        return $query->where('type', 'customer');
-    }
-
-    public function scopeSuppliers($query)
-    {
-        return $query->where('type', 'supplier');
-    }
-
-    public function scopeEmployees($query)
-    {
-        return $query->where('type', 'employee');
-    }
-
-    public function scopeCandidates($query, ?string $track = null)
-    {
-        $query->where('type', 'candidate');
-
-        return $track ? $query->where('track', $track) : $query;
+        static::saving(function (Contact $contact) {
+            $contact->phone_normalized = self::normalizePhone($contact->phone);
+        });
     }
 
     /**
-     * Starts (or restarts) this contact's candidate pipeline for a given
-     * track. If they already have a "real" type (customer/supplier), that
-     * gets preserved in previous_type so it can be restored on rejection.
-     * Called both by internal "convert to candidate" actions and by the
-     * public application forms creating a fresh Contact.
+     * Normalises Pakistani mobile numbers so 0300-1234567, +92 300 1234567
+     * and 923001234567 are recognised as the same customer.
      */
-    public function applyAsCandidate(string $track, ?string $notes = null): void
+    public static function normalizePhone(?string $phone): ?string
     {
-        $this->update([
-            'previous_type' => $this->type !== 'candidate' ? $this->type : $this->previous_type,
-            'type' => 'candidate',
-            'track' => $track,
-            'stage' => 'applied',
-            'application_notes' => $notes,
-            'applied_at' => now(),
-        ]);
+        if ($phone === null) {
+            return null;
+        }
+        $digits = preg_replace('/\D+/', '', $phone) ?? '';
+        if ($digits === '') {
+            return null;
+        }
+        if (str_starts_with($digits, '0092')) {
+            $digits = substr($digits, 4);
+        } elseif (str_starts_with($digits, '92') && strlen($digits) === 12) {
+            $digits = substr($digits, 2);
+        } elseif (str_starts_with($digits, '0') && strlen($digits) === 11) {
+            $digits = substr($digits, 1);
+        }
+
+        return $digits;
     }
 
-    /**
-     * Advances the candidate to a new pipeline stage without changing
-     * their type — used for applied → reviewing → interview transitions.
-     */
-    public function advanceStage(string $stage): void
+    public function scopeOfType(Builder $query, string $type): Builder
     {
-        $this->update(['stage' => $stage]);
+        return $query->where('type', $type);
     }
 
-    /**
-     * Hires the candidate — flips their type to the outcome matching
-     * their track (employee or supplier). The employee 5-tab profile
-     * becomes relevant/populated from this point on.
-     */
-    public function hire(): void
+    public function scopeCustomers(Builder $query): Builder
     {
-        $this->update([
-            'type' => $this->track === 'supplier' ? 'supplier' : 'employee',
-            'stage' => 'hired',
-        ]);
+        return $query->where('type', self::TYPE_CUSTOMER)->whereNull('merged_into_id');
     }
 
-    /**
-     * Rejects the candidate — restores their previous type if they had
-     * one (e.g. they were already a customer), or simply marks the
-     * candidate record as rejected if this was a fresh public applicant
-     * with no prior relationship to revert to.
-     */
-    public function reject(): void
+    public function scopeEmployees(Builder $query): Builder
     {
-        $this->update([
-            'type' => $this->previous_type ?? 'candidate',
-            'stage' => 'rejected',
-        ]);
+        return $query->where('type', self::TYPE_EMPLOYEE);
     }
 
-    /**
-     * Total spent across all completed (paid) POS orders, net of any
-     * refunds issued against this contact. Draft/cancelled orders and
-     * refund documents themselves are excluded from the "orders" side —
-     * refunds are subtracted separately so the net figure is accurate.
-     */
-    public function totalSpent(): float
+    public function scopeSearch(Builder $query, ?string $term): Builder
     {
-        $orderedTotal = (float) $this->documents()
-            ->where('type', 'pos_order')
-            ->where('status', 'paid')
-            ->sum('total');
+        $term = trim((string) $term);
+        if ($term === '') {
+            return $query;
+        }
+        $phone = self::normalizePhone($term);
 
-        $refundedTotal = (float) $this->documents()
-            ->where('type', 'pos_refund')
-            ->sum('total');
-
-        return round($orderedTotal - $refundedTotal, 2);
+        return $query->where(function (Builder $q) use ($term, $phone) {
+            $q->whereRaw('lower(name) like ?', ['%'.mb_strtolower($term).'%'])
+                ->orWhere('code', 'ilike', $term.'%');
+            if ($phone !== null && strlen($phone) >= 4) {
+                $q->orWhere('phone_normalized', 'like', '%'.$phone.'%');
+            }
+        });
     }
 
-    /**
-     * Count of completed (paid) POS orders placed by this contact.
-     */
-    public function orderCount(): int
+    public function user(): BelongsTo
     {
-        return $this->documents()
-            ->where('type', 'pos_order')
-            ->where('status', 'paid')
-            ->count();
+        return $this->belongsTo(User::class);
+    }
+
+    public function store(): BelongsTo
+    {
+        return $this->belongsTo(Store::class);
+    }
+
+    public function customerProfile(): HasOne
+    {
+        return $this->hasOne(CustomerProfile::class);
+    }
+
+    public function supplierProfile(): HasOne
+    {
+        return $this->hasOne(SupplierProfile::class);
     }
 
     public function employeeDetail(): HasOne
@@ -160,9 +125,39 @@ class Contact extends Model
         return $this->hasOne(EmployeeDetail::class);
     }
 
-    public function workSchedules(): HasMany
+    public function tags(): BelongsToMany
     {
-        return $this->hasMany(EmployeeWorkSchedule::class)->orderBy('day');
+        return $this->belongsToMany(Tag::class, 'contact_tag');
+    }
+
+    public function interactions(): HasMany
+    {
+        return $this->hasMany(CrmInteraction::class)->latest('occurred_at');
+    }
+
+    public function invoices(): HasMany
+    {
+        return $this->hasMany(SalesInvoice::class, 'customer_id');
+    }
+
+    public function salesOrders(): HasMany
+    {
+        return $this->hasMany(SalesOrder::class, 'customer_id');
+    }
+
+    public function documents(): HasMany
+    {
+        return $this->hasMany(EmployeeDocument::class);
+    }
+
+    public function skills(): BelongsToMany
+    {
+        return $this->belongsToMany(Skill::class, 'employee_skill')->withPivot('level')->withTimestamps();
+    }
+
+    public function badges(): BelongsToMany
+    {
+        return $this->belongsToMany(Badge::class, 'employee_badge')->withPivot('awarded_at')->withTimestamps();
     }
 
     public function resumeItems(): HasMany
@@ -170,41 +165,19 @@ class Contact extends Model
         return $this->hasMany(EmployeeResumeItem::class)->orderBy('sort_order');
     }
 
-    public function skills(): BelongsToMany
+    public function mergedInto(): BelongsTo
     {
-        return $this->belongsToMany(Skill::class, 'employee_skill')
-            ->withPivot('level')
-            ->withTimestamps();
+        return $this->belongsTo(Contact::class, 'merged_into_id');
     }
 
-    public function badges(): BelongsToMany
+    // Recruitment (workspace app)
+    public function applicationStage(): BelongsTo
     {
-        return $this->belongsToMany(Badge::class, 'employee_badge')
-            ->withPivot('awarded_at')
-            ->withTimestamps();
+        return $this->belongsTo(ApplicationStage::class);
     }
 
-    public function directReports(): HasMany
+    public function jobAts(): BelongsTo
     {
-        return $this->hasMany(EmployeeDetail::class, 'manager_contact_id');
-    }
-
-    public function activityHistory(): \Illuminate\Support\Collection
-    {
-        $asSubject = \App\Models\ActivityLog::where('subject_type', self::class)
-            ->where('subject_id', $this->id)
-            ->with('user:id,name')
-            ->get();
-
-        $asUser = $this->user_id
-            ? \App\Models\ActivityLog::where('user_id', $this->user_id)
-                ->with('user:id,name')
-                ->get()
-            : collect();
-
-        return $asSubject->concat($asUser)
-            ->unique('id')
-            ->sortByDesc('created_at')
-            ->values();
+        return $this->belongsTo(JobAts::class, 'job_ats_id');
     }
 }

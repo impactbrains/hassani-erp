@@ -2,35 +2,28 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\MorphTo;
 
+/**
+ * One line of the immutable stock ledger. Quantities are signed and in base units.
+ */
 class StockMovement extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    // No updated_at column on this table — it's an immutable ledger entry.
-    const UPDATED_AT = null;
+    public const UPDATED_AT = null;
 
-    protected $fillable = [
-        'variant_id',
-        'location_id',
-        'user_id',
-        'quantity_change',
-        'type',
-        'reference_type',
-        'reference_id',
-        'note',
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'quantity' => 'decimal:3',
+        'unit_cost' => 'decimal:6',
+        'total_cost' => 'decimal:2',
+        'occurred_at' => 'datetime',
+        'business_date' => 'date:Y-m-d',
     ];
-
-    protected function casts(): array
-    {
-        return [
-            'quantity_change' => 'decimal:6',
-        ];
-    }
 
     public function variant(): BelongsTo
     {
@@ -39,7 +32,22 @@ class StockMovement extends Model
 
     public function location(): BelongsTo
     {
-        return $this->belongsTo(Location::class, 'location_id');
+        return $this->belongsTo(Location::class);
+    }
+
+    public function store(): BelongsTo
+    {
+        return $this->belongsTo(Store::class);
+    }
+
+    public function batch(): BelongsTo
+    {
+        return $this->belongsTo(StockBatch::class, 'batch_id');
+    }
+
+    public function reasonCode(): BelongsTo
+    {
+        return $this->belongsTo(ReasonCode::class);
     }
 
     public function user(): BelongsTo
@@ -47,12 +55,15 @@ class StockMovement extends Model
         return $this->belongsTo(User::class);
     }
 
-    /**
-     * The record that caused this movement, if any (e.g. a Document
-     * for a purchase/sale, or null for a manual adjustment).
-     */
-    public function reference(): MorphTo
+    public function approver(): BelongsTo
     {
-        return $this->morphTo(__FUNCTION__, 'reference_type', 'reference_id');
+        return $this->belongsTo(User::class, 'approved_by');
+    }
+
+
+    protected static function booted(): void
+    {
+        static::updating(fn () => throw new \LogicException(static::class.' rows are append-only; post a reversal.'));
+        static::deleting(fn () => throw new \LogicException(static::class.' rows are append-only; post a reversal.'));
     }
 }

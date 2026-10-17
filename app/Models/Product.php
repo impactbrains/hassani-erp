@@ -2,53 +2,55 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/**
+ * A product as customers know it ("Tapal Family Mixture"). Sellable SKUs are its variants.
+ */
 class Product extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'name',
-        'category_id',
-        'brand',
-        'description',
-        'tax_id',
-        'has_variants',
-        'is_active',
-        'can_edit_price',
-        'media_id',
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'track_batches' => 'boolean',
+        'track_expiry' => 'boolean',
+        'is_online' => 'boolean',
+        'is_active' => 'boolean',
     ];
-
-    protected function casts(): array
-    {
-        return [
-            'has_variants' => 'boolean',
-            'is_active' => 'boolean',
-            'can_edit_price' => 'boolean',
-        ];
-    }
 
     public function category(): BelongsTo
     {
         return $this->belongsTo(ProductCategory::class, 'category_id');
     }
 
-    public function tax(): BelongsTo
+    public function brand(): BelongsTo
     {
-        return $this->belongsTo(Tax::class, 'tax_id');
+        return $this->belongsTo(Brand::class);
+    }
+
+    public function taxCategory(): BelongsTo
+    {
+        return $this->belongsTo(TaxCategory::class);
     }
 
     public function variants(): HasMany
     {
-        return $this->hasMany(ProductVariant::class, 'product_id');
+        return $this->hasMany(ProductVariant::class);
     }
 
-    public function media(): BelongsTo
+    public function image(): BelongsTo
     {
-        return $this->belongsTo(Media::class);
+        return $this->belongsTo(Media::class, 'image_media_id');
+    }
+
+
+    public function isStocked(): bool
+    {
+        return in_array($this->type, ['stocked', 'bundle'], true);
     }
 }

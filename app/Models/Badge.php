@@ -2,20 +2,18 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Badge extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = ['name', 'icon', 'color'];
+    protected $guarded = ['id', 'company_id'];
 
-    public function contacts(): BelongsToMany
+    public function employees(): BelongsToMany
     {
-        return $this->belongsToMany(Contact::class, 'employee_badge')
-            ->withPivot('awarded_at')
-            ->withTimestamps();
+        return $this->belongsToMany(Contact::class, 'employee_badge');
     }
 }

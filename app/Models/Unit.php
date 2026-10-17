@@ -2,21 +2,18 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Unit extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'name',
-        'short_code',
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'allows_fraction' => 'boolean',
+        'is_active' => 'boolean',
+        'decimals' => 'integer',
     ];
-
-    public function variants(): HasMany
-    {
-        return $this->hasMany(ProductVariant::class, 'unit_id');
-    }
 }

@@ -2,122 +2,99 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/**
+ * A sellable, stock-keeping unit (SKU). Stock is held in its base unit.
+ */
 class ProductVariant extends Model
 {
-    use HasFactory;
+    protected $appends = ['display_name'];
 
-    protected $fillable = [
-        'product_id',
-        'name',
-        'sku',
-        'barcode',
-        'price',
-        'cost',
-        'tax_id',
-        'unit_id',
-        'pack_size',
-        'low_stock_threshold',
-        'track_inventory',
-        'is_loose',
-        'is_active',
-        'can_edit_price',
-        'media_id',
+    use BelongsToCompany;
+
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'mrp' => 'decimal:2',
+        'attributes' => 'array',
+        'is_loose' => 'boolean',
+        'is_default' => 'boolean',
+        'is_active' => 'boolean',
     ];
-
-    public function media(): BelongsTo
-    {
-        return $this->belongsTo(Media::class);
-    }
-
-    protected function casts(): array
-    {
-        return [
-            'price' => 'decimal:2',
-            'cost' => 'decimal:2',
-            'pack_size' => 'decimal:3',
-            'low_stock_threshold' => 'decimal:3',
-            'track_inventory' => 'boolean',
-            'is_loose' => 'boolean',
-            'is_active' => 'boolean',
-            'can_edit_price' => 'boolean',
-        ];
-    }
 
     public function product(): BelongsTo
     {
-        return $this->belongsTo(Product::class, 'product_id');
+        return $this->belongsTo(Product::class);
     }
 
-    public function tax(): BelongsTo
+    public function baseUnit(): BelongsTo
     {
-        // Falls back to the parent product's tax if this variant has none set.
-        return $this->belongsTo(Tax::class, 'tax_id');
+        return $this->belongsTo(Unit::class, 'base_unit_id');
     }
 
-    public function unit(): BelongsTo
+    public function units(): HasMany
     {
-        return $this->belongsTo(Unit::class, 'unit_id');
+        return $this->hasMany(VariantUnit::class, 'variant_id');
     }
 
-    public function stockMovements(): HasMany
+    public function barcodes(): HasMany
     {
-        return $this->hasMany(StockMovement::class, 'variant_id');
+        return $this->hasMany(Barcode::class, 'variant_id');
     }
 
-    public function documentLines(): HasMany
+    public function prices(): HasMany
     {
-        return $this->hasMany(DocumentLine::class, 'variant_id');
+        return $this->hasMany(Price::class, 'variant_id');
     }
 
-    /**
-     * The effective tax to apply — variant override, else parent product's default.
-     */
-    public function effectiveTax(): ?Tax
+    public function bundleComponents(): HasMany
     {
-        return $this->tax ?? $this->product?->tax;
+        return $this->hasMany(BundleComponent::class, 'bundle_variant_id');
     }
 
-    /**
-     * Current stock on hand, computed live from the movement ledger.
-     * Pass $locationId to scope to a single location, or omit for the
-     * total across all locations.
-     * For hot paths (POS grid), prefer a StockLevel cache table instead — see note below.
-     */
-    public function stockOnHand(?int $locationId = null): float
+    public function stockLevels(): HasMany
     {
-        $query = $this->stockMovements();
+        return $this->hasMany(StockLevel::class, 'variant_id');
+    }
 
-        if ($locationId) {
-            $query->where('location_id', $locationId);
+
+    /** "Product – Variant" when the product is loaded with the variant; plain variant name otherwise (never lazy-loads). */
+    public function getDisplayNameAttribute(): string
+    {
+        $name = (string) ($this->attributes['name'] ?? '');
+        if (! $this->relationLoaded('product') || $this->product === null || $this->product->name === $name || $name === '') {
+            return $name !== '' ? $name : (string) $this->product?->name;
         }
 
-        return (float) $query->sum('quantity_change');
+        return $this->product->name.' – '.$name;
     }
 
-    /**
-     * Whether this variant is at or below its configured low-stock threshold.
-     * Returns false if inventory isn't tracked for this variant, or no
-     * threshold has been configured (null means "no alert wanted").
-     */
-    public function isLowStock(?int $locationId = null): bool
-    {
-        if (! $this->track_inventory || $this->low_stock_threshold === null) {
-            return false;
-        }
-
-        return $this->stockOnHand($locationId) <= (float) $this->low_stock_threshold;
-    }
-
-    /**
-     * A display label combining product name + variant name, e.g. "Coca-Cola — 500ml"
-     */
     public function displayName(): string
     {
-        return trim(($this->product?->name ?? '') . ' — ' . $this->name, ' —');
+        $product = $this->product;
+        if ($product === null || $this->name === $product->name) {
+            return $this->name;
+        }
+
+        return $product->name.' – '.$this->name;
+    }
+
+    public function displayNameUr(): ?string
+    {
+        $productUr = $this->product?->name_ur;
+        if ($this->name_ur && $productUr && $this->name_ur !== $productUr) {
+            return $productUr.' – '.$this->name_ur;
+        }
+
+        return $this->name_ur ?: $productUr;
+    }
+
+    public function isBundle(): bool
+    {
+        return $this->product?->type === 'bundle';
     }
 }

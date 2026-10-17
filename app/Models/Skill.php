@@ -2,20 +2,18 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Skill extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = ['name'];
+    protected $guarded = ['id', 'company_id'];
 
-    public function contacts(): BelongsToMany
+    public function employees(): BelongsToMany
     {
-        return $this->belongsToMany(Contact::class, 'employee_skill')
-            ->withPivot('level')
-            ->withTimestamps();
+        return $this->belongsToMany(Contact::class, 'employee_skill');
     }
 }

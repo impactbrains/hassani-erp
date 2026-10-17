@@ -2,12 +2,18 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Department extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = ['name'];
+    protected $guarded = ['id', 'company_id'];
+
+    public function positions(): HasMany
+    {
+        return $this->hasMany(JobPosition::class);
+    }
 }

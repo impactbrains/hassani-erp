@@ -2,62 +2,32 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Storage;
 
+/**
+ * An uploaded file. Product images use the public disk; employee documents,
+ * attachments and receipts use the private disk and are only served through
+ * authorised, audited downloads.
+ */
 class Media extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'type',
-        'path',
-        'url',
-        'name',
-    ];
+    protected $guarded = ['id', 'company_id'];
 
-    /**
-     * The actual displayable URL, regardless of whether this media item
-     * is a local upload or an external link.
-     */
-    public function resolvedUrl(): ?string
+    protected $appends = ['url'];
+
+    protected $hidden = ['path'];
+
+    public function getUrlAttribute(): ?string
     {
-        if ($this->type === 'url') {
-            return $this->url;
-        }
+        return $this->disk === 'public' ? Storage::disk('public')->url($this->path) : null;
+    }
 
-        return $this->path ? asset('uploads/media/' . $this->path) : null;
-    }
-    public function getIsImageAttribute(): bool
-{
-    if ($this->type === 'url') {
-        // Can't sniff a remote URL's mime type without an HTTP call, so
-        // assume image — url-type media in this system has only ever
-        // been used for image links so far.
-        return true;
-    }
- 
-    if ($this->mime_type === null) {
-        return true;
-    }
- 
-    return str_starts_with($this->mime_type, 'image/');
-}
-    public function getFormattedSizeAttribute(): ?string
+    public function isPrivate(): bool
     {
-        if (! $this->size) {
-            return null;
-        }
-    
-        $units = ['B', 'KB', 'MB', 'GB'];
-        $bytes = $this->size;
-        $i = 0;
-    
-        while ($bytes >= 1024 && $i < count($units) - 1) {
-            $bytes /= 1024;
-            $i++;
-        }
-    
-        return round($bytes, 1) . ' ' . $units[$i];
+        return $this->disk !== 'public';
     }
 }

@@ -2,62 +2,40 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+/**
+ * HR profile of an employee contact. CNIC and bank account are encrypted at rest.
+ */
 class EmployeeDetail extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'contact_id',
-        'department_id',
-        'job_position_id',
-        'job_title',
-        'manager_contact_id',
-        'work_address',
-        'work_location',
-        'note',
-        'resume_file_media_id',
-        'private_email',
-        'private_phone',
-        'bank_account',
-        'legal_name',
-        'birthday',
-        'place_of_birth',
-        'birth_country',
-        'gender',
-        'emergency_contact_name',
-        'emergency_contact_phone',
-        'visa_no',
-        'work_permit_no',
-        'visa_document_media_id',
-        'nationality',
-        'identification_no',
-        'ssn_no',
-        'passport_no',
-        'private_address',
-        'home_work_distance',
-        'marital_status',
-        'dependent_children',
-        'certificate_level',
-        'field_of_study',
-        'id_card_media_id',
-        'driving_license_media_id',
+    protected $guarded = ['id', 'company_id'];
+
+    protected $hidden = ['cnic', 'bank_account', 'cnic_hash'];
+
+    protected $casts = [
+        'joining_date' => 'date:Y-m-d',
+        'probation_end_date' => 'date:Y-m-d',
+        'confirmation_date' => 'date:Y-m-d',
+        'exit_date' => 'date:Y-m-d',
+        'cnic_expiry' => 'date:Y-m-d',
+        'date_of_birth' => 'date:Y-m-d',
+        'cnic' => 'encrypted',
+        'bank_account' => 'encrypted',
     ];
-
-    protected function casts(): array
-    {
-        return [
-            'birthday' => 'date',
-            'dependent_children' => 'integer',
-        ];
-    }
 
     public function contact(): BelongsTo
     {
         return $this->belongsTo(Contact::class);
+    }
+
+    public function store(): BelongsTo
+    {
+        return $this->belongsTo(Store::class);
     }
 
     public function department(): BelongsTo
@@ -65,9 +43,9 @@ class EmployeeDetail extends Model
         return $this->belongsTo(Department::class);
     }
 
-    public function jobPosition(): BelongsTo
+    public function position(): BelongsTo
     {
-        return $this->belongsTo(JobPosition::class);
+        return $this->belongsTo(JobPosition::class, 'job_position_id');
     }
 
     public function manager(): BelongsTo
@@ -75,23 +53,8 @@ class EmployeeDetail extends Model
         return $this->belongsTo(Contact::class, 'manager_contact_id');
     }
 
-    public function resumeFile(): BelongsTo
+    public function photo(): BelongsTo
     {
-        return $this->belongsTo(Media::class, 'resume_file_media_id');
-    }
-
-    public function visaDocument(): BelongsTo
-    {
-        return $this->belongsTo(Media::class, 'visa_document_media_id');
-    }
-
-    public function idCard(): BelongsTo
-    {
-        return $this->belongsTo(Media::class, 'id_card_media_id');
-    }
-
-    public function drivingLicense(): BelongsTo
-    {
-        return $this->belongsTo(Media::class, 'driving_license_media_id');
+        return $this->belongsTo(Media::class, 'photo_media_id');
     }
 }

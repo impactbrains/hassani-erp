@@ -2,32 +2,63 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Payment extends Model
 {
-    use HasFactory;
+    use BelongsToCompany;
 
-    protected $fillable = [
-        'document_id',
-        'method',
-        'amount',
-        'paid_at',
-        'reference',
+    protected $guarded = ['id', 'company_id'];
+
+    protected $casts = [
+        'amount' => 'decimal:2',
+        'tendered_amount' => 'decimal:2',
+        'change_amount' => 'decimal:2',
+        'verified_at' => 'datetime',
+        'received_at' => 'datetime',
+        'business_date' => 'date:Y-m-d',
     ];
 
-    protected function casts(): array
+    public function store(): BelongsTo
     {
-        return [
-            'amount' => 'decimal:2',
-            'paid_at' => 'datetime',
-        ];
+        return $this->belongsTo(Store::class);
     }
 
-    public function document(): BelongsTo
+    public function contact(): BelongsTo
     {
-        return $this->belongsTo(Document::class);
+        return $this->belongsTo(Contact::class);
+    }
+
+    public function method(): BelongsTo
+    {
+        return $this->belongsTo(PaymentMethod::class, 'payment_method_id');
+    }
+
+    public function allocations(): HasMany
+    {
+        return $this->hasMany(PaymentAllocation::class);
+    }
+
+    public function shift(): BelongsTo
+    {
+        return $this->belongsTo(Shift::class);
+    }
+
+    public function rider(): BelongsTo
+    {
+        return $this->belongsTo(Contact::class, 'rider_id');
+    }
+
+    public function receiver(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'received_by');
+    }
+
+    public function verifier(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'verified_by');
     }
 }

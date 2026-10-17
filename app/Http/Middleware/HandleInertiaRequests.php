@@ -2,73 +2,66 @@
 
 namespace App\Http\Middleware;
 
-use Illuminate\Foundation\Inspiring;
+use App\Models\Store;
+use App\Support\Settings\Settings;
+use App\Support\Tenancy\CurrentCompany;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
+/**
+ * Props shared with every page. Permissions are sent for showing and hiding
+ * controls only; every action is checked again on the server.
+ */
 class HandleInertiaRequests extends Middleware
 {
-    /**
-     * The root template that's loaded on the first page visit.
-     *
-     * @see https://inertiajs.com/server-side-setup#root-template
-     *
-     * @var string
-     */
     protected $rootView = 'app';
 
-    /**
-     * Determines the current asset version.
-     *
-     * @see https://inertiajs.com/asset-versioning
-     */
     public function version(Request $request): ?string
     {
         return parent::version($request);
     }
 
-    /**
-     * Every app key that can have a permission level. Kept in sync with
-     * resources/js/config/apps.ts and UserPermissionController::APPS.
-     */
-    private const APPS = [
-        'pos',
-        'inventory',
-        'products',
-        'invoicing',
-        'sales',
-        'accounting',
-        'website',
-        'contacts',
-        'barcode',
-        'todo',
-        'chat',
-    ];
-
-    /**
-     * Define the props that are shared by default.
-     *
-     * @see https://inertiajs.com/shared-data
-     *
-     * @return array<string, mixed>
-     */
     public function share(Request $request): array
     {
-        [$message, $author] = str(Inspiring::quotes()->random())->explode('-');
-
         $user = $request->user();
+        $company = CurrentCompany::get();
+        $storeId = $request->attributes->get('store_id');
 
-        return array_merge(parent::share($request), [
-            'name' => config('app.name'),
-            'quote' => ['message' => trim($message), 'author' => trim($author)],
-            'auth' => [
-                'user' => $user,
+        return [
+            ...parent::share($request),
+            'app' => [
+                'name' => config('app.name'),
+                'company' => $company ? ['id' => $company->id, 'name' => $company->name, 'currency' => $company->currency, 'timezone' => $company->timezone] : null,
             ],
-            'permissions' => $user
-                ? collect(self::APPS)->mapWithKeys(
-                    fn (string $app) => [$app => $user->accessLevelFor($app)]
-                )
-                : (object) [],
-        ]);
+            'auth' => fn () => $user ? [
+                'user' => ['id' => $user->id, 'name' => $user->name, 'email' => $user->email, 'is_owner' => $user->isOwner(), 'has_pin' => $user->pin_hash !== null, 'two_factor' => $user->two_factor_confirmed_at !== null],
+                'permissions' => $user->permissionKeys(),
+                'stores' => Store::query()->whereIn('id', $user->accessibleStoreIds())->orderBy('name')->get(['id', 'code', 'name', 'name_ur'])->toArray(),
+                'store_id' => $storeId,
+            ] : null,
+            'locale' => fn () => self::locale($request),
+            'flash' => fn () => [
+                'success' => $request->session()->get('success'),
+                'error' => $request->session()->get('error'),
+                'secret' => $request->session()->get('secret'),
+            ],
+            'ziggy' => fn () => ['location' => $request->url()],
+        ];
+    }
+
+    public static function locale(Request $request): string
+    {
+        $user = $request->user();
+        if ($user?->locale) {
+            return $user->locale;
+        }
+        if ($request->hasSession() && $request->session()->has('locale')) {
+            return (string) $request->session()->get('locale');
+        }
+        try {
+            return CurrentCompany::id() ? (string) Settings::get('localization.default_locale') : 'en';
+        } catch (\Throwable) {
+            return 'en';
+        }
     }
 }
