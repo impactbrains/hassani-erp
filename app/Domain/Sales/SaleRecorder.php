@@ -118,6 +118,7 @@ final class SaleRecorder
                     'revenue_amount' => $priced['revenue_amount'],
                     'line_total' => $priced['line_total'],
                     'approval_id' => $line->approvalId,
+                    'price_rule_id' => $line->priceRuleId,
                 ]);
 
                 $lineCost = $this->takeStock($draft, $line, $invoiceLine, $context);

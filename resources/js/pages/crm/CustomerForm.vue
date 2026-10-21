@@ -4,6 +4,7 @@ import { useForm } from '@inertiajs/vue3';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
 import Field from '@/components/form/Field.vue';
+import LinkedText from '@/components/ui/LinkedText.vue';
 import ContactPicker from '@/components/app/ContactPicker.vue';
 import { can } from '@/lib/perms';
 import { t } from '@/lib/i18n';
@@ -56,11 +57,11 @@ function submit() {
                 <h3>{{ t('Type and prices') }}</h3>
                 <div class="grid grid-cols-2 gap-3">
                     <Field label="Customer type"><select v-model="form.category" class="input"><option value="retail">{{ t('Retail') }}</option><option value="wholesale">{{ t('Wholesale') }}</option><option value="shopkeeper">{{ t('Shopkeeper') }}</option><option value="institution">{{ t('Institution') }}</option></select></Field>
-                    <Field label="Price list"><select v-model="form.price_book_id" class="input"><option :value="null">{{ t('Standard retail') }}</option><option v-for="b in priceBooks" :key="b.id" :value="b.id">{{ b.name }}</option></select></Field>
+                    <Field label="Price list"><select v-model="form.price_book_id" class="input"><option :value="null">{{ t('In-store (standard)') }}</option><option v-for="b in priceBooks" :key="b.id" :value="b.id">{{ b.name }}</option></select></Field>
                 </div>
                 <Field label="Sales agent"><ContactPicker v-model="agent" type="employee" :placeholder="c?.customer_profile?.sales_agent?.name ?? t('None')" /></Field>
                 <Field label="Tags">
-                    <div class="flex flex-wrap gap-2"><label v-for="tg in tags" :key="tg.id" class="flex items-center gap-1 text-sm"><input v-model="form.tag_ids" type="checkbox" :value="tg.id" class="rounded border-ink-300" />{{ tg.name }}</label><span v-if="!tags.length" class="text-sm text-ink-500">{{ t('Tags are added in Settings → Lists.') }}</span></div>
+                    <div class="flex flex-wrap gap-2"><label v-for="tg in tags" :key="tg.id" class="flex items-center gap-1 text-sm"><input v-model="form.tag_ids" type="checkbox" :value="tg.id" class="rounded border-ink-300" />{{ tg.name }}</label><span v-if="!tags.length" class="text-sm text-ink-500"><LinkedText :text="t('Tags are added in Settings → Lists.')" :phrases="['Settings → Lists', 'ترتیبات → فہرستیں']" :href="can('crm.customers.manage') ? route('settings.lists', { list: 'tags' }) : null" /></span></div>
                 </Field>
             </section>
             <section class="panel space-y-3 p-4">

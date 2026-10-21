@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { router, useForm } from '@inertiajs/vue3';
 import { RotateCcw } from 'lucide-vue-next';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
 import Badge from '@/components/ui/Badge.vue';
 import Field from '@/components/form/Field.vue';
+import PillInput from '@/components/ui/PillInput.vue';
 import { t } from '@/lib/i18n';
 
 /**
@@ -16,7 +17,9 @@ const props = defineProps<{ groups: Record<string, string>; settings: any[]; com
 const group = ref(Object.keys(props.groups)[0]);
 const q = ref('');
 const values = reactive<Record<string, any>>({});
-props.settings.forEach((s) => (values[s.key] = s.type === 'json' ? JSON.stringify(s.value) : s.value));
+const PILL_KEYS = ['pos.denominations']; // number lists edited as pills instead of raw JSON
+props.settings.forEach((s) => (values[s.key] = PILL_KEYS.includes(s.key) ? [...(s.value ?? [])] : s.type === 'json' ? JSON.stringify(s.value) : s.value));
+watch(() => props.settings, (list) => list.filter((s) => PILL_KEYS.includes(s.key)).forEach((s) => (values[s.key] = [...(s.value ?? [])])));
 const shown = computed(() => props.settings.filter((s) => (q.value ? `${s.label} ${s.description}`.toLowerCase().includes(q.value.toLowerCase()) : s.group === group.value) && (!props.storeId || s.scopes.includes('store'))));
 const company = useForm({ ...props.company });
 function changeStore(id: string) {
@@ -24,7 +27,7 @@ function changeStore(id: string) {
 }
 function save(s: any) {
     let value = values[s.key];
-    if (s.type === 'json') {
+    if (s.type === 'json' && !Array.isArray(value)) {
         try { value = JSON.parse(value); } catch { alert(t('This needs a valid list, e.g. [5000, 1000, 500]')); return; }
     }
     if (s.high_impact && !confirm(t('This changes how existing figures are calculated or shown. Continue?'))) return;
@@ -72,6 +75,7 @@ const sourceLabel: Record<string, string> = { default: 'Default', company: 'Busi
                         <select v-if="s.options" v-model="values[s.key]" class="input" :disabled="!s.can_edit"><option v-for="(l, k) in s.options" :key="k" :value="s.type === 'int' ? Number(k) : k">{{ l }}</option></select>
                         <label v-else-if="s.type === 'bool'" class="flex items-center gap-2 py-2 text-sm"><input v-model="values[s.key]" type="checkbox" class="rounded border-ink-300" :disabled="!s.can_edit" />{{ values[s.key] ? t('On') : t('Off') }}</label>
                         <input v-else-if="s.type === 'int' || s.type === 'decimal'" v-model="values[s.key]" type="number" step="any" class="input text-end" :disabled="!s.can_edit" />
+                        <PillInput v-else-if="PILL_KEYS.includes(s.key)" v-model="values[s.key]" :disabled="!s.can_edit" />
                         <textarea v-else-if="s.type === 'json'" v-model="values[s.key]" rows="2" class="input font-mono text-[12.5px]" :disabled="!s.can_edit" />
                         <input v-else v-model="values[s.key]" class="input" :disabled="!s.can_edit" />
                     </div>

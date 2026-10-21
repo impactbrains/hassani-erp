@@ -8,15 +8,17 @@ import { today } from '@/lib/format';
 import { employmentTypes, roleTypes } from '@/lib/hr';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ employee: any | null; showSensitive: boolean; departments: any[]; positions: any[]; managers: any[] }>();
+const props = defineProps<{ employee: any | null; showSensitive: boolean; departments: any[]; positions: any[]; managers: any[]; canCreateLogin?: boolean; loginRoles?: { id: number; name: string; description: string | null }[]; hasLogin?: string | null; minPasswordLength?: number }>();
 const page = usePage<any>();
 const e = props.employee;
+const presetRole = new URLSearchParams(page.url.split('?')[1] ?? '').get('role_type'); // e.g. the Riders page sends role_type=rider
 const d = e?.employee_detail ?? {};
 const sensitiveKeys = ['cnic', 'cnic_expiry', 'bank_name', 'bank_account', 'date_of_birth', 'father_name', 'private_address', 'eobi_no', 'social_security_no'];
 const base: Record<string, any> = {
     name: e?.name ?? '', name_ur: e?.name_ur ?? '', phone: e?.phone ?? '', email: e?.email ?? '', address: e?.address ?? '', city: e?.city ?? 'Karachi',
-    store_id: d.store_id ?? page.props.auth?.store_id ?? null, department_id: d.department_id ?? null, job_position_id: d.job_position_id ?? null, job_title: d.job_title ?? '', role_type: d.role_type ?? 'cashier',
+    store_id: d.store_id ?? page.props.auth?.store_id ?? null, department_id: d.department_id ?? null, job_position_id: d.job_position_id ?? null, job_title: d.job_title ?? '', role_type: d.role_type ?? (presetRole && presetRole in roleTypes ? presetRole : 'cashier'),
     manager_contact_id: d.manager_contact_id ?? null, employment_type: d.employment_type ?? 'probation', joining_date: d.joining_date ? String(d.joining_date).slice(0, 10) : today(), probation_end_date: d.probation_end_date ? String(d.probation_end_date).slice(0, 10) : '',
+    create_login: false, login_role_id: null as number | null, login_password: '',
     gender: d.gender ?? null, marital_status: d.marital_status ?? null, emergency_contact_name: d.emergency_contact_name ?? '', emergency_contact_phone: d.emergency_contact_phone ?? '', emergency_contact_relation: d.emergency_contact_relation ?? '', education_level: d.education_level ?? '', note: d.note ?? '',
 };
 if (props.showSensitive) sensitiveKeys.forEach((k) => (base[k] = d[k] ? (k.includes('date') || k.includes('expiry') ? String(d[k]).slice(0, 10) : d[k]) : ''));
@@ -76,6 +78,19 @@ function submit() {
                 </div>
                 <Field label="Home address (private)"><input v-model="form.private_address" class="input" /></Field>
             </section>
+            <section v-if="canCreateLogin" class="panel space-y-3 p-4">
+                <label class="flex items-center gap-2 font-medium"><input v-model="form.create_login" type="checkbox" />{{ t('Also give this employee a login') }}</label>
+                <p class="text-[12.5px] text-ink-500">{{ t('They sign in with the e-mail above. You choose a temporary password (or leave it empty and one is made for you); they must change it the first time they sign in. If you later resign or terminate the employee, the login is switched off.') }}</p>
+                <template v-if="form.create_login">
+                    <Field label="Role" :error="form.errors.login_role_id" required>
+                        <select v-model="form.login_role_id" class="input"><option :value="null">—</option><option v-for="r in loginRoles ?? []" :key="r.id" :value="r.id">{{ r.name }}</option></select>
+                    </Field>
+                    <p class="text-[12.5px] text-ink-500">{{ t('The role applies to the store chosen above. You can only give roles whose permissions you hold yourself.') }}</p>
+                    <Field label="Temporary password" :error="form.errors.login_password"><input v-model="form.login_password" type="text" autocomplete="off" class="input" :placeholder="t('Leave empty to make one for me')" /></Field>
+                    <p class="text-[12.5px] text-ink-500">{{ t('At least :n characters with letters and numbers.', { n: Math.max(8, minPasswordLength ?? 10) }) }}</p>
+                </template>
+            </section>
+            <p v-else-if="hasLogin" class="text-[12.5px] text-ink-500">{{ t('Login') }}: {{ hasLogin }}</p>
             <Field label="Notes"><textarea v-model="form.note" rows="2" class="input" /></Field>
             <p v-for="(er, k) in form.errors" :key="k" class="text-sm text-ledger-red">{{ er }}</p>
             <div class="flex justify-end gap-2"><Button :href="e ? route('hr.employees.show', e.id) : route('hr.employees.index')">{{ t('Cancel') }}</Button><Button variant="primary" :loading="form.processing" @click="submit">{{ t('Save') }}</Button></div>

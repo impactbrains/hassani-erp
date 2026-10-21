@@ -3,6 +3,7 @@ import { Link } from '@inertiajs/vue3';
 import Badge from '@/components/ui/Badge.vue';
 import { date, dateTime, money, percent, qty } from '@/lib/format';
 import { t } from '@/lib/i18n';
+import { openRow } from '@/lib/rowClick';
 
 /**
  * Table for lists. Columns say how to show each value (money, quantity,
@@ -37,7 +38,7 @@ function show(c: Column, v: any) {
                 <tr><th v-for="c in columns" :key="c.key" :class="[numeric(c) ? 'text-end' : '', c.class]">{{ t(c.label) }}</th><th v-if="$slots.actions" /></tr>
             </thead>
             <tbody>
-                <tr v-for="(row, i) in rows" :key="row.id ?? i">
+                <tr v-for="(row, i) in rows" :key="row.id ?? i" :class="rowHref && rowHref(row) ? 'cursor-pointer hover:bg-ink-50/60' : ''" @click="openRow($event, rowHref?.(row))">
                     <td v-for="(c, ci) in columns" :key="c.key" :class="[numeric(c) ? 'num' : '', c.class]">
                         <slot :name="`cell-${c.key}`" :row="row" :value="value(row, c.key)">
                             <Badge v-if="c.type === 'status' && value(row, c.key)" :status="value(row, c.key)" />

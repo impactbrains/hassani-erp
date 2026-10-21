@@ -32,6 +32,8 @@ class HandleInertiaRequests extends Middleware
             'app' => [
                 'name' => config('app.name'),
                 'company' => $company ? ['id' => $company->id, 'name' => $company->name, 'currency' => $company->currency, 'timezone' => $company->timezone] : null,
+                // The working store's time zone (its own, else the company's). Every time on screen uses it.
+                'timezone' => $this->timezone($storeId, $company?->timezone),
             ],
             'auth' => fn () => $user ? [
                 'user' => ['id' => $user->id, 'name' => $user->name, 'email' => $user->email, 'is_owner' => $user->isOwner(), 'has_pin' => $user->pin_hash !== null, 'two_factor' => $user->two_factor_confirmed_at !== null],
@@ -47,6 +49,13 @@ class HandleInertiaRequests extends Middleware
             ],
             'ziggy' => fn () => ['location' => $request->url()],
         ];
+    }
+
+    private function timezone(mixed $storeId, ?string $companyZone): string
+    {
+        $zone = $storeId ? Store::query()->whereKey($storeId)->value('timezone') : null;
+
+        return \App\Domain\Reporting\ReportFilters::safeTimezone($zone ?: $companyZone);
     }
 
     public static function locale(Request $request): string

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { Link, router, usePage } from '@inertiajs/vue3';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ArrowDownRight, ArrowUpRight, CircleAlert, CircleCheck, ClipboardCheck, ShoppingCart } from 'lucide-vue-next';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
 import Badge from '@/components/ui/Badge.vue';
 import ColumnChart from '@/components/charts/ColumnChart.vue';
-import { dateTime, money, qty } from '@/lib/format';
+import { appTimezone, currentHour, dateTime, money, qty } from '@/lib/format';
 import { localName, t } from '@/lib/i18n';
 import { can } from '@/lib/perms';
 
@@ -27,7 +27,27 @@ const presets = [
     ['this_week', 'This week'],
     ['this_month', 'This month'],
     ['last_30_days', 'Last 30 days'],
+    ['last_month', 'Last month'],
 ] as const;
+
+const compareChoices = [
+    ['previous_period', 'The period just before'],
+    ['previous_year', 'Same dates last year'],
+    ['none', 'Nothing'],
+] as const;
+
+// Custom range pickers start on whatever period is showing.
+const fromDate = ref<string>(props.dashboard?.period?.from ?? '');
+const toDate = ref<string>(props.dashboard?.period?.to ?? '');
+watch(() => props.dashboard?.period, (p) => {
+    if (p) { fromDate.value = p.from; toDate.value = p.to; }
+});
+const compare = computed<string>(() => d.value?.filters?.compare ?? 'previous_period');
+const rangeError = computed(() => {
+    const serverError = (page.props as any).errors?.from ?? (page.props as any).errors?.to;
+    if (fromDate.value && toDate.value && toDate.value < fromDate.value) return t('The end date is before the start date.');
+    return serverError ?? null;
+});
 
 const card = (key: string) => d.value?.sales?.find((s: any) => s.key === key);
 const hero = computed(() => card(d.value?.financials ? 'net_sales' : 'transactions'));
@@ -72,7 +92,7 @@ const ALERTS: Record<string, string> = {
 };
 
 const greeting = computed(() => {
-    const h = Number(new Date().toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Karachi' }));
+    const h = currentHour();
     return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
 });
 const periodText = computed(() => {
@@ -81,9 +101,27 @@ const periodText = computed(() => {
     return d.value.period.from === d.value.period.to ? fmt(d.value.period.from) : `${fmt(d.value.period.from)} – ${fmt(d.value.period.to)}`;
 });
 
-function setPreset(p: string) {
-    router.get(route('dashboard'), { preset: p }, { preserveScroll: true, preserveState: true, only: ['dashboard'] });
+function visit(query: Record<string, string>) {
+    router.get(route('dashboard'), query, { preserveScroll: true, preserveState: true, only: ['dashboard', 'errors'] });
 }
+function setPreset(p: string) {
+    visit({ preset: p, compare: compare.value });
+}
+function applyRange() {
+    if (!fromDate.value || !toDate.value || rangeError.value) return;
+    visit({ preset: 'custom', from: fromDate.value, to: toDate.value, compare: compare.value });
+}
+function setCompare(c: string) {
+    visit(preset.value === 'custom' ? { preset: 'custom', from: fromDate.value, to: toDate.value, compare: c } : { preset: preset.value, compare: c });
+}
+const shortDate = (s: string) => new Date(s + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+/** What the arrows on the cards are measured against, with the real dates. */
+const compareText = computed(() => {
+    const p = d.value?.period;
+    if (!p?.compare_from) return null;
+    const range = p.compare_from === p.compare_to ? shortDate(p.compare_from) : `${shortDate(p.compare_from)} – ${shortDate(p.compare_to)}`;
+    return `${t(compare.value === 'previous_year' ? 'vs same dates last year' : 'vs previous period')} (${range})`;
+});
 function change(c: any, invert = false) {
     if (c?.change === null || c?.change === undefined) return null;
     const n = Number(c.change);
@@ -109,6 +147,25 @@ function change(c: any, invert = false) {
         </template>
     </PageHeader>
 
+    <section v-if="d" class="panel mb-4 flex flex-wrap items-end gap-x-4 gap-y-3 p-3" :aria-label="t('Choose dates')">
+        <div>
+            <label for="dash-from" class="mb-1 block text-[12.5px] font-medium text-ink-600">{{ t('From date') }}</label>
+            <input id="dash-from" v-model="fromDate" type="date" class="input h-10" :max="toDate || undefined" />
+        </div>
+        <div>
+            <label for="dash-to" class="mb-1 block text-[12.5px] font-medium text-ink-600">{{ t('To date') }}</label>
+            <input id="dash-to" v-model="toDate" type="date" class="input h-10" :min="fromDate || undefined" />
+        </div>
+        <Button variant="primary" :disabled="!fromDate || !toDate || !!rangeError" @click="applyRange">{{ t('Show these dates') }}</Button>
+        <div class="ms-auto">
+            <label for="dash-compare" class="mb-1 block text-[12.5px] font-medium text-ink-600">{{ t('Compare with') }}</label>
+            <select id="dash-compare" class="input h-10" :value="compare" @change="setCompare(($event.target as HTMLSelectElement).value)">
+                <option v-for="[key, label] in compareChoices" :key="key" :value="key">{{ t(label) }}</option>
+            </select>
+        </div>
+        <p v-if="rangeError" class="w-full text-[13px] text-ledger-red" role="alert">{{ rangeError }}</p>
+    </section>
+
     <div v-if="!d" class="panel p-8 text-center text-ink-600">
         <p class="text-base">{{ t('Your dashboard appears here once the owner gives you access to it.') }}</p>
         <div class="mt-4 flex justify-center gap-2">
@@ -131,7 +188,7 @@ function change(c: any, invert = false) {
                         <ArrowDownRight v-else class="h-4 w-4" />
                         {{ change(hero)!.n }}%
                     </span>
-                    <span class="text-ink-300">{{ t('vs previous period') }} · {{ d.financials ? money(hero?.previous) : qty(hero?.previous) }}</span>
+                    <span class="text-ink-300">{{ compareText }} · {{ d.financials ? money(hero?.previous) : qty(hero?.previous) }}</span>
                 </div>
                 <p v-if="d.financials && !d.cost_complete" class="mt-3 text-[13px] text-haldi-300">{{ t('Some product costs are unknown, so margin is overstated.') }}</p>
             </div>
@@ -149,7 +206,10 @@ function change(c: any, invert = false) {
         <div class="mb-5 grid gap-5 xl:grid-cols-3">
             <section class="panel xl:col-span-2">
                 <div class="panel-head">
-                    <h2>{{ t('Sales by hour') }}</h2>
+                    <div>
+                        <h2>{{ t('Sales by hour') }}</h2>
+                        <p class="text-[12px] font-normal text-ink-500">{{ t('Times are shown in :zone', { zone: (d.timezone ?? appTimezone()).replace('_', ' ') }) }}</p>
+                    </div>
                     <button v-if="d.hourly.length" class="text-[13px] text-ink-500 underline-offset-2 hover:underline" @click="showTable = !showTable">{{ showTable ? t('Show chart') : t('Show table') }}</button>
                 </div>
                 <div class="p-4">

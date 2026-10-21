@@ -19,21 +19,27 @@ class LookupController extends Controller
 {
     public function products(Request $request, CatalogSearch $catalog): JsonResponse
     {
-        abort_unless($request->user()->hasAnyPermission(['pos.sell', 'catalog.products.view', 'sales.orders.manage', 'inventory.stock.view', 'purchasing.orders.manage']), 403);
+        abort_unless($request->user()->hasAnyPermission(['pos.sell', 'catalog.products.view', 'sales.orders.manage', 'inventory.stock.view', 'purchasing.orders.manage', 'purchasing.receive', 'inventory.purchase_stock']), 403);
         $storeId = (int) ($request->integer('store_id') ?: $this->currentStore($request)->id);
         abort_unless(in_array($storeId, $request->user()->accessibleStoreIds(), true), 403);
-        $priceBookId = $request->integer('price_book_id') ?: ($request->integer('customer_id') ? Contact::query()->with('customerProfile')->find($request->integer('customer_id'))?->customerProfile?->price_book_id : null);
+        $customer = $request->integer('customer_id') ? Contact::query()->customers()->with('customerProfile')->find($request->integer('customer_id')) : null;
+        $priceBookId = $request->integer('price_book_id') ?: $customer?->customerProfile?->price_book_id;
+        $store = \App\Models\Store::query()->find($storeId);
+        $pricing = $store ? new \App\Domain\Catalog\PriceContext($storeId, $customer, $store->businessDate()) : null;
 
         $purpose = in_array($request->query('purpose'), ['sale', 'purchase', 'any'], true) ? $request->query('purpose') : 'sale';
+        // Buying screens show what the item cost last time, to people who buy stock or may see costs.
+        $costs = $purpose === 'purchase' && $request->user()->hasAnyPermission(['catalog.costs.view', 'inventory.purchase_stock', 'purchasing.orders.manage', 'purchasing.receive'])
+            ? ['supplier_id' => $request->integer('supplier_id') ?: null] : null;
 
-        return response()->json($catalog->search($request->string('q'), $storeId, $priceBookId, min(50, $request->integer('limit', 20)), $request->integer('category_id') ?: null, false, $purpose));
+        return response()->json($catalog->search($request->string('q'), $storeId, $priceBookId, min(50, $request->integer('limit', 20)), $request->integer('category_id') ?: null, false, $purpose, $costs, $pricing));
     }
 
     public function contacts(Request $request, string $type): JsonResponse
     {
         $permission = match ($type) {
             'customer' => 'crm.customers.view|pos.sell|sales.orders.manage|sales.payments.receive',
-            'supplier' => 'purchasing.suppliers.view|purchasing.orders.manage|purchasing.receive',
+            'supplier' => 'purchasing.suppliers.view|purchasing.orders.manage|purchasing.receive|inventory.purchase_stock',
             'employee' => 'hr.employees.view|sales.deliveries.manage|sales.targets.manage|hr.attendance.manage|settings.users.manage',
             default => abort(404),
         };

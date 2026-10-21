@@ -3,6 +3,7 @@ import PageHeader from '@/components/ui/PageHeader.vue';
 import DataTable from '@/components/ui/DataTable.vue';
 import Pagination from '@/components/ui/Pagination.vue';
 import Button from '@/components/ui/Button.vue';
+import { Link } from '@inertiajs/vue3';
 import { useFilters } from '@/composables/useFilters';
 import { can } from '@/lib/perms';
 import { t } from '@/lib/i18n';
@@ -19,6 +20,7 @@ const columns = [
 <template>
     <PageHeader :title="t('Stock adjustments')" :subtitle="t('Opening stock, damage and expiry write-offs, corrections and quarantine. Large values need a manager to approve.')">
         <template #actions>
+            <Button v-if="can('inventory.purchase_stock')" :href="route('purchasing.purchase-stock')">{{ t('Purchase stock') }}</Button>
             <template v-if="can('inventory.adjust')">
                 <Button :href="route('inventory.adjustments.create', { kind: 'opening' })">{{ t('Opening stock') }}</Button>
                 <Button :href="route('inventory.adjustments.create', { kind: 'adjustment' })">{{ t('Correction') }}</Button>
@@ -26,6 +28,10 @@ const columns = [
             </template>
         </template>
     </PageHeader>
+    <p v-if="can('inventory.purchase_stock') || can('purchasing.receive')" class="mb-3 text-[13px] text-ink-600">
+        {{ t('Stock you buy from suppliers is not listed here.') }}
+        <Link :href="route('purchasing.receipts.index')" class="link">{{ t('See it in Goods received') }}</Link>
+    </p>
     <div class="panel mb-4 flex flex-wrap gap-3 p-3">
         <select v-model="filters.kind" class="input max-w-[14rem]"><option value="">{{ t('All types') }}</option><option v-for="(l, k) in kinds" :key="k" :value="k">{{ t(l) }}</option></select>
         <select v-model="filters.status" class="input max-w-[14rem]"><option value="">{{ t('Any status') }}</option><option value="pending_approval">{{ t('Waiting for approval') }}</option><option value="posted">{{ t('Posted') }}</option><option value="rejected">{{ t('Rejected') }}</option></select>

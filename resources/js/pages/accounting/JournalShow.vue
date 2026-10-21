@@ -9,7 +9,7 @@ import Field from '@/components/form/Field.vue';
 import { date, dateTime, money, today } from '@/lib/format';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ journal: any; source: { type: string; id: number } | null; canReverse: boolean }>();
+const props = defineProps<{ pager?: any; journal: any; source: { type: string; id: number } | null; canReverse: boolean }>();
 const reversing = ref(false);
 const form = useForm({ date: today(), reason: '' });
 const routes: Record<string, string> = { SalesInvoice: 'sales.invoices.show', SalesOrder: 'sales.orders.show', GoodsReceipt: 'purchasing.receipts.show', SupplierBill: 'purchasing.bills.show', Shift: 'pos.shifts.show', StockAdjustment: 'inventory.adjustments.show', StockTransfer: 'inventory.transfers.show', StockCount: 'inventory.counts.show', PayrollRun: 'hr.payroll.show' };
@@ -19,7 +19,7 @@ const cr = computed(() => props.journal.lines.reduce((s: number, l: any) => s + 
 </script>
 
 <template>
-    <PageHeader :title="`${t('Journal')} ${journal.number}`" :subtitle="`${date(journal.entry_date)} · ${journal.description}`">
+    <PageHeader :pager="pager" :title="`${t('Journal')} ${journal.number}`" :subtitle="`${date(journal.entry_date)} · ${journal.description}`">
         <template #actions>
             <Badge :status="journal.status" />
             <Button v-if="sourceHref" :href="sourceHref">{{ t('Open the document') }}</Button>

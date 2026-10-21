@@ -28,10 +28,13 @@ final class DashboardService
             ];
         $data['cost_complete'] = $now['cost_complete'];
 
+        // Each sale is placed in the hour of its own store's time zone.
+        $local = $f->localTimeSql('posted_at', 'store_id');
         $data['hourly'] = DB::table('sales_invoices')->where('status', 'posted')->whereBetween('business_date', [$f->from, $f->to])->whereIn('store_id', $f->storeIds)
-            ->groupByRaw("EXTRACT(HOUR FROM posted_at AT TIME ZONE '{$f->timezone}')")->orderByRaw('1')
-            ->selectRaw("EXTRACT(HOUR FROM posted_at AT TIME ZONE '{$f->timezone}')::int AS hour, COUNT(*) AS transactions, SUM(subtotal - discount_total) AS sales")->get()
+            ->groupByRaw("EXTRACT(HOUR FROM {$local})")->orderByRaw('1')
+            ->selectRaw("EXTRACT(HOUR FROM {$local})::int AS hour, COUNT(*) AS transactions, SUM(subtotal - discount_total) AS sales")->get()
             ->map(fn ($r) => ['hour' => (int) $r->hour, 'transactions' => (int) $r->transactions, 'sales' => $financials ? Decimal::money($r->sales) : null])->all();
+        $data['timezone'] = $f->timezone;
 
         $data['top_products'] = DB::table('sales_invoice_lines as l')->join('sales_invoices as i', 'i.id', '=', 'l.sales_invoice_id')->join('product_variants as v', 'v.id', '=', 'l.variant_id')->join('products as p', 'p.id', '=', 'v.product_id')
             ->where('i.status', 'posted')->whereBetween('i.business_date', [$f->from, $f->to])->whereIn('i.store_id', $f->storeIds)

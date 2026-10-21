@@ -3,6 +3,7 @@
 namespace App\Domain\Hr;
 
 use App\Exceptions\BusinessRuleException;
+use App\Models\AttendanceBreak;
 use App\Models\AttendanceCorrection;
 use App\Models\AttendanceRecord;
 use App\Models\Contact;
@@ -79,11 +80,16 @@ final class AttendanceService
         $this->authorizePunch($user, $employee);
         $at = CarbonImmutable::instance($at ?? now())->utc();
 
-        return DB::transaction(function () use ($employee, $at, $source) {
+        return DB::transaction(function () use ($user, $employee, $at, $source) {
             $record = AttendanceRecord::query()->where('contact_id', $employee->id)->whereNotNull('clock_in_at')->whereNull('clock_out_at')
                 ->orderByDesc('work_date')->lockForUpdate()->first();
             if ($record === null) {
                 throw new BusinessRuleException("{$employee->name} has not clocked in.", 'not_clocked_in');
+            }
+            $open = AttendanceBreak::query()->where('contact_id', $employee->id)->whereNull('ended_at')->lockForUpdate()->get();
+            foreach ($open as $break) {
+                $end = $at->lt($break->started_at) ? CarbonImmutable::instance($break->started_at) : $at;
+                $break->update(['ended_at' => $end, 'minutes' => $this->minutesBetween($break->started_at, $end), 'ended_by' => $user->id, 'note' => trim(($break->note ? $break->note.' · ' : '').'Ended automatically at clock-out')]);
             }
             $record->fill(['clock_out_at' => $at, 'clock_out_source' => $source]);
             $this->evaluate($record, $employee);
@@ -105,6 +111,7 @@ final class AttendanceService
         $halfDay = (int) Settings::get('hr.half_day_minutes');
         $overtimeAfter = (int) Settings::get('hr.overtime_after_minutes');
 
+        $this->applyBreakTotals($record, $employee);
         $record->late_minutes = 0;
         $record->early_leave_minutes = 0;
         $record->overtime_minutes = 0;
@@ -129,13 +136,160 @@ final class AttendanceService
         }
         if ($record->clock_out_at) {
             $out = CarbonImmutable::instance($record->clock_out_at)->setTimezone($tz);
-            $break = $roster?->workShift?->break_minutes ?? 0;
+            // Real breaks replace the shift's planned break only when unpaid breaks are being deducted and some were recorded.
+            $break = ((bool) Settings::get('hr.deduct_unpaid_breaks') && (int) $record->break_minutes > 0)
+                ? (int) $record->unpaid_break_minutes
+                : ($roster?->workShift?->break_minutes ?? 0);
             $record->worked_minutes = max(0, (int) floor(($out->getTimestamp() - $in->getTimestamp()) / 60) - $break);
             if ($record->worked_minutes < $halfDay) {
                 $status = 'half_day';
             }
         }
         $record->status = $status;
+    }
+
+    /** The employee (or a manager for them) starts a break. Only one break can be open at a time. */
+    public function startBreak(User $user, Contact $employee, string $type, bool $unpaid = false): AttendanceBreak
+    {
+        $this->authorizePunch($user, $employee);
+        $this->assertType($type);
+
+        return DB::transaction(function () use ($user, $employee, $type, $unpaid) {
+            $record = AttendanceRecord::query()->where('contact_id', $employee->id)->whereNotNull('clock_in_at')->whereNull('clock_out_at')
+                ->orderByDesc('work_date')->lockForUpdate()->first();
+            if ($record === null) {
+                throw new BusinessRuleException("{$employee->name} is not clocked in, so there is no working day to take a break from.", 'not_clocked_in');
+            }
+            if (AttendanceBreak::query()->where('contact_id', $employee->id)->whereNull('ended_at')->exists()) {
+                throw new BusinessRuleException("{$employee->name} is already on a break. End it first.", 'break_open');
+            }
+            $break = AttendanceBreak::create([
+                'store_id' => $record->store_id, 'contact_id' => $employee->id, 'attendance_record_id' => $record->id, 'work_date' => $record->work_date->toDateString(),
+                'type' => $type, 'started_at' => now()->utc(), 'is_unpaid' => $unpaid,
+                'entered_by' => $user->id, 'entered_by_role' => $this->enteredByRole($user, $employee),
+            ]);
+            Audit::record('hr.break_started', "{$employee->name} started a {$type} break", $break);
+
+            return $break;
+        });
+    }
+
+    public function endBreak(User $user, AttendanceBreak $break): AttendanceBreak
+    {
+        $employee = $break->contact;
+        $this->authorizePunch($user, $employee);
+        if ($break->ended_at !== null) {
+            throw new BusinessRuleException('This break has already ended.', 'break_closed');
+        }
+
+        return DB::transaction(function () use ($user, $break, $employee) {
+            $end = CarbonImmutable::now()->utc();
+            if ($end->lt($break->started_at)) {
+                $end = CarbonImmutable::instance($break->started_at);
+            }
+            $break->update(['ended_at' => $end, 'minutes' => $this->minutesBetween($break->started_at, $end), 'ended_by' => $user->id]);
+            $this->refreshDay($employee, $break->work_date->toDateString());
+            Audit::record('hr.break_ended', "{$employee->name} ended a {$break->type} break ({$break->minutes} min)", $break);
+
+            return $break;
+        });
+    }
+
+    /**
+     * A break typed in afterwards (a forgotten Start/End). Managers can do this for anyone; an employee only for
+     * themselves and only for the last three days. Who entered it is always kept.
+     */
+    public function addBreak(User $user, Contact $employee, string $date, string $type, string $from, string $to, bool $unpaid, ?string $note): AttendanceBreak
+    {
+        $this->authorizePunch($user, $employee);
+        $this->assertType($type);
+        $self = $this->enteredByRole($user, $employee) === 'employee';
+        if ($self && CarbonImmutable::parse($date)->lt(CarbonImmutable::today()->subDays(3))) {
+            throw new BusinessRuleException('You can add your own breaks for the last 3 days. Ask a manager for older days.', 'break_too_old');
+        }
+        $tz = $this->timezone($employee);
+        $start = CarbonImmutable::parse($date.' '.$from, $tz)->utc();
+        $end = CarbonImmutable::parse($date.' '.$to, $tz)->utc();
+        if ($end->lte($start)) {
+            throw new BusinessRuleException('The break must end after it starts.', 'break_order', field: 'to');
+        }
+
+        return DB::transaction(function () use ($user, $employee, $date, $type, $start, $end, $unpaid, $note) {
+            $record = AttendanceRecord::query()->where('contact_id', $employee->id)->where('work_date', $date)->lockForUpdate()->first();
+            if ($record === null || $record->clock_in_at === null) {
+                throw new BusinessRuleException("{$employee->name} has no clock-in on that day. Correct the attendance first.", 'no_attendance', field: 'date');
+            }
+            if ($start->lt($record->clock_in_at) || ($record->clock_out_at && $end->gt($record->clock_out_at))) {
+                throw new BusinessRuleException('The break falls outside the hours clocked that day.', 'break_outside_day', field: 'from');
+            }
+            $overlap = AttendanceBreak::query()->where('contact_id', $employee->id)->where('work_date', $date)
+                ->where('started_at', '<', $end)->where(fn ($q) => $q->whereNull('ended_at')->orWhere('ended_at', '>', $start))->exists();
+            if ($overlap) {
+                throw new BusinessRuleException('This overlaps another break that day.', 'break_overlap', field: 'from');
+            }
+            $break = AttendanceBreak::create([
+                'store_id' => $record->store_id, 'contact_id' => $employee->id, 'attendance_record_id' => $record->id, 'work_date' => $date,
+                'type' => $type, 'started_at' => $start, 'ended_at' => $end, 'minutes' => $this->minutesBetween($start, $end), 'is_unpaid' => $unpaid,
+                'entered_by' => $user->id, 'entered_by_role' => $this->enteredByRole($user, $employee), 'ended_by' => $user->id, 'note' => $note,
+            ]);
+            $this->refreshDay($employee, $date);
+            Audit::record('hr.break_added', "Break of {$break->minutes} min added for {$employee->name} on {$date}", $break);
+
+            return $break;
+        });
+    }
+
+    public function deleteBreak(User $user, AttendanceBreak $break): void
+    {
+        if (! $user->hasPermission('hr.attendance.manage')) {
+            throw new BusinessRuleException('Only a manager can remove a break.', 'not_permitted');
+        }
+        $employee = $break->contact;
+        DB::transaction(function () use ($break, $employee) {
+            $date = $break->work_date->toDateString();
+            Audit::record('hr.break_removed', "Break of {$break->minutes} min removed for {$employee->name} on {$date}", $break, $break->only(['type', 'started_at', 'ended_at', 'minutes', 'is_unpaid', 'entered_by', 'entered_by_role']));
+            $break->delete();
+            $this->refreshDay($employee, $date);
+        });
+    }
+
+    /** Recomputes the day's totals after a break changed. */
+    private function refreshDay(Contact $employee, string $date): void
+    {
+        $record = AttendanceRecord::query()->where('contact_id', $employee->id)->where('work_date', $date)->first();
+        if ($record) {
+            $this->evaluate($record, $employee);
+            $record->save();
+        }
+    }
+
+    /** Sums the day's finished breaks and flags time above the allowed minutes. */
+    private function applyBreakTotals(AttendanceRecord $record, Contact $employee): void
+    {
+        $date = $record->work_date instanceof \DateTimeInterface ? $record->work_date->format('Y-m-d') : (string) $record->work_date;
+        $breaks = AttendanceBreak::query()->where('contact_id', $employee->id)->where('work_date', $date)->whereNotNull('ended_at')->get(['minutes', 'is_unpaid']);
+        $total = (int) $breaks->sum('minutes');
+        $allowed = (int) Settings::get('hr.break_allowed_minutes', $record->store_id);
+        $record->break_minutes = $total;
+        $record->unpaid_break_minutes = (int) $breaks->where('is_unpaid', true)->sum('minutes');
+        $record->break_over_minutes = $allowed > 0 ? max(0, $total - $allowed) : 0;
+    }
+
+    private function minutesBetween(\DateTimeInterface $from, \DateTimeInterface $to): int
+    {
+        return max(0, (int) floor((CarbonImmutable::instance($to)->getTimestamp() - CarbonImmutable::instance($from)->getTimestamp()) / 60));
+    }
+
+    private function enteredByRole(User $user, Contact $employee): string
+    {
+        return $user->employee?->id === $employee->id ? 'employee' : 'manager';
+    }
+
+    private function assertType(string $type): void
+    {
+        if (! in_array($type, AttendanceBreak::TYPES, true)) {
+            throw new BusinessRuleException('Choose meal, prayer or other.', 'invalid_break_type', field: 'type');
+        }
     }
 
     /**

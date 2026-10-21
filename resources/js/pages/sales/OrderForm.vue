@@ -79,7 +79,7 @@ function submit() {
                 <div class="flex justify-between"><span>{{ t('Items') }}</span><span class="tabular-nums">{{ money(subtotal) }}</span></div>
                 <div v-if="form.fulfillment_type === 'delivery'" class="flex justify-between"><span>{{ t('Delivery') }}</span><span class="tabular-nums">{{ money(form.delivery_charge) }}</span></div>
                 <div class="flex justify-between border-t border-ink-100 pt-2 text-base font-semibold"><span>{{ t('Total') }}</span><span class="tabular-nums">{{ money(total) }}</span></div>
-                <p class="pt-1 text-[12px] text-ink-500">{{ t('Prices are re-checked against the price list when saved.') }}</p>
+                <p class="pt-1 text-[12px] text-ink-500">{{ t('Prices are worked out again when you save, including price rules.') }}</p>
             </section>
             <p v-for="(e, k) in form.errors" :key="k" class="text-sm text-ledger-red">{{ e }}</p>
             <div class="flex gap-2"><Button class="flex-1" :href="editing ? route('sales.orders.show', order.id) : route('sales.orders.index')">{{ t('Cancel') }}</Button><Button class="flex-1" variant="primary" :disabled="!form.lines.length || !form.customer_id" :loading="form.processing" @click="submit">{{ t('Save order') }}</Button></div>

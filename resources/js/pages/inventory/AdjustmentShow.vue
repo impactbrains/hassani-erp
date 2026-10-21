@@ -7,7 +7,7 @@ import Button from '@/components/ui/Button.vue';
 import { date, dateTime, money, qty } from '@/lib/format';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ adjustment: any; canApprove: boolean; showCost: boolean }>();
+const props = defineProps<{ pager?: any; adjustment: any; canApprove: boolean; showCost: boolean }>();
 const reason = ref('');
 const kinds: Record<string, string> = { opening: 'Opening stock', write_off: 'Write-off', adjustment: 'Correction', quarantine: 'Quarantine', release: 'Release from quarantine' };
 function decide(decision: 'approve' | 'reject') {
@@ -16,7 +16,7 @@ function decide(decision: 'approve' | 'reject') {
 </script>
 
 <template>
-    <PageHeader :title="`${t(kinds[adjustment.kind] ?? adjustment.kind)} ${adjustment.number}`" :subtitle="`${adjustment.store?.name} · ${date(adjustment.business_date ?? adjustment.created_at)}`">
+    <PageHeader :pager="pager" :title="`${t(kinds[adjustment.kind] ?? adjustment.kind)} ${adjustment.number}`" :subtitle="`${adjustment.store?.name} · ${date(adjustment.business_date ?? adjustment.created_at)}`">
         <template #actions><Badge :status="adjustment.status" /><Button :href="route('inventory.adjustments.index')">{{ t('All adjustments') }}</Button></template>
     </PageHeader>
     <section class="panel mb-5 grid gap-4 p-4 text-sm md:grid-cols-4">

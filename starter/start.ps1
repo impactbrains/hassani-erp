@@ -5,6 +5,7 @@
 #   1. finds PHP and PostgreSQL (and offers to install them with winget the first time),
 #   2. switches on the PHP extensions the app needs,
 #   3. creates the database and brings it up to date (safe to run every day),
+#      - steps 1-3 are skipped on later starts unless something changed (see "fast path"),
 #   4. starts the web server, the background worker and the scheduler,
 #   5. opens the app in the browser (Chrome with silent receipt printing when available).
 # Closing this window stops everything.
@@ -21,9 +22,11 @@ $Url = "http://localhost:$Port"
 $LogDir = Join-Path $Root 'storage\logs'
 $PidFile = Join-Path $Root 'storage\framework\hassani-processes.txt'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$StampFile = Join-Path $Root 'storage\framework\hassani-setup.stamp'
+$Clock = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Say($text, $color = 'Gray') { Write-Host $text -ForegroundColor $color }
-function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Yellow }
+function Step($text) { Write-Host ''; Write-Host ("==> $text   [{0:n1}s]" -f $Clock.Elapsed.TotalSeconds) -ForegroundColor Yellow }
 function Fail($text) {
     Write-Host ''
     Write-Host "PROBLEM: $text" -ForegroundColor Red
@@ -97,6 +100,56 @@ function Stop-Leftovers {
     Get-CimInstance Win32_Process -Filter "Name = 'php.exe'" | Where-Object { $_.CommandLine -match 'server\.php' -and $_.CommandLine -match [regex]::Escape($Root) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 }
 
+# True when something is listening on host:port (used to see if PostgreSQL is already up).
+function Test-TcpPort($hostName, $port) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $task = $client.ConnectAsync($hostName, [int]$port)
+        return ($task.Wait(1500) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+# A cheap fingerprint of everything the one-time setup depends on: PHP, php.ini, .env, the
+# composer lock, the built screens and the app's own code/config/migrations. Never looks inside vendor.
+function Get-SetupStamp($phpPath) {
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("php|$phpPath;")
+    $files = @('.env', 'composer.lock', 'public\build\manifest.json') | ForEach-Object { Join-Path $Root $_ }
+    $files += $phpPath
+    $files += (Join-Path (Split-Path -Parent $phpPath) 'php.ini')
+    foreach ($p in $files) {
+        $i = New-Object System.IO.FileInfo $p
+        if ($i.Exists) { [void]$sb.Append("$p|$($i.Length)|$($i.LastWriteTimeUtc.Ticks);") }
+        else { [void]$sb.Append("$p|missing;") }
+    }
+    foreach ($d in @('app', 'config', 'routes', 'database\migrations', 'database\seeders', 'resources\views')) {
+        $dir = Join-Path $Root $d
+        $count = 0; $bytes = [long]0; $newest = [long]0
+        if (Test-Path $dir) {
+            foreach ($f in [System.IO.Directory]::EnumerateFiles($dir, '*', [System.IO.SearchOption]::AllDirectories)) {
+                $i = New-Object System.IO.FileInfo $f
+                $count++; $bytes += $i.Length
+                if ($i.LastWriteTimeUtc.Ticks -gt $newest) { $newest = $i.LastWriteTimeUtc.Ticks }
+            }
+        }
+        [void]$sb.Append("$d|$count|$bytes|$newest;")
+    }
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    return [BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($sb.ToString()))).Replace('-', '')
+}
+# Sets "key = value" in php.ini text: edits an active line, else un-comments one, else appends.
+function Set-IniSetting([string]$text, [string]$key, [string]$value) {
+    $k = [regex]::Escape($key)
+    $active = [regex]"(?m)^[ \t]*$k[ \t]*=[^\r\n]*"
+    $commented = [regex]"(?m)^;[ \t]*$k[ \t]*=[^\r\n]*"
+    if ($active.IsMatch($text)) { return $active.Replace($text, "$key = $value", 1) }
+    if ($commented.IsMatch($text)) { return $commented.Replace($text, "$key = $value", 1) }
+    return $text + "`r`n$key = $value"
+}
+
 Say '  _   _                         _   ' 'DarkYellow'
 Say ' | | | | __ _ ___ ___  __ _ _ __ (_)  ERP' 'DarkYellow'
 Say ' | |_| |/ _` / __/ __|/ _` | ''_ \| |' 'DarkYellow'
@@ -128,6 +181,30 @@ if (-not $php) {
     }
     if (-not $php) { Fail 'PHP 8.3 is needed. Install it, then start again.' }
 }
+
+# Settings from .env (created from .env.example the first time).
+$envFile = Join-Path $Root '.env'
+if (-not (Test-Path $envFile)) { Copy-Item (Join-Path $Root '.env.example') $envFile; Say 'Created .env from .env.example' }
+$cfg = Read-DotEnv $envFile
+$dbHost = if ($cfg['DB_HOST']) { $cfg['DB_HOST'] } else { '127.0.0.1' }
+$dbPort = if ($cfg['DB_PORT']) { $cfg['DB_PORT'] } else { '5432' }
+$dbName = if ($cfg['DB_DATABASE']) { $cfg['DB_DATABASE'] } else { 'hassani_erp' }
+$dbUser = if ($cfg['DB_USERNAME']) { $cfg['DB_USERNAME'] } else { 'postgres' }
+$dbPass = $cfg['DB_PASSWORD']
+# SERVER_HOST=0.0.0.0 in .env lets other computers on the shop network open the app.
+$BindHost = if ($cfg['SERVER_HOST']) { $cfg['SERVER_HOST'] } else { '127.0.0.1' }
+
+# Fast path: after the first successful start, skip PHP/PostgreSQL checks, migrations and caching
+# until something that needs them has changed (PHP, .env, app code, migrations, built screens).
+$fastStart = $false
+if ((Test-Path $StampFile) -and (Test-Path (Join-Path $Root 'bootstrap\cache\config.php'))) {
+    $savedStamp = "$(Get-Content $StampFile -Raw)".Trim()
+    if ($savedStamp -eq (Get-SetupStamp $php) -and (Test-TcpPort $dbHost $dbPort)) { $fastStart = $true }
+}
+if ($fastStart) {
+    Say 'Nothing changed since the last start - skipping setup.' 'Green'
+} else {
+
 $version = & $php -r 'echo PHP_VERSION;'
 Say "PHP $version at $php"
 if ([version]($version -replace '[^0-9.].*$', '') -lt [version]'8.2') { Fail "PHP $version is too old. PHP 8.2 or newer is needed (8.3 recommended)." }
@@ -161,19 +238,24 @@ if ($missing -and (Test-Path $ini)) {
     else { Say 'PHP extensions switched on.' }
 }
 
+# Speed: OPcache keeps the compiled app in memory, so PHP stops re-reading and re-compiling every file on every request.
+$opcacheDll = Join-Path $phpDir 'ext\php_opcache.dll'
+if ((Test-Path $ini) -and (Test-Path $opcacheDll)) {
+    $text = Get-Content $ini -Raw
+    $before = $text
+    $zend = [regex]'(?m)^;?[ \t]*zend_extension[ \t]*=[ \t]*"?(php_)?opcache(\.dll)?"?[^\r\n]*'
+    if ($zend.IsMatch($text)) { $text = $zend.Replace($text, 'zend_extension=opcache', 1) } else { $text += "`r`nzend_extension=opcache" }
+    $text = Set-IniSetting $text 'opcache.enable' '1'
+    $text = Set-IniSetting $text 'opcache.enable_cli' '1'
+    $text = Set-IniSetting $text 'opcache.memory_consumption' '256'
+    $text = Set-IniSetting $text 'opcache.max_accelerated_files' '20000'
+    $text = Set-IniSetting $text 'realpath_cache_size' '4096k'
+    $text = Set-IniSetting $text 'realpath_cache_ttl' '600'
+    if ($text -ne $before) { Set-Content -Path $ini -Value $text -Encoding ASCII; Say 'PHP speed settings (OPcache) switched on.' }
+}
+
 # ---------------------------------------------------------------- 2. PostgreSQL
 Step 'Checking PostgreSQL'
-$envFile = Join-Path $Root '.env'
-if (-not (Test-Path $envFile)) { Copy-Item (Join-Path $Root '.env.example') $envFile; Say 'Created .env from .env.example' }
-$cfg = Read-DotEnv $envFile
-$dbHost = if ($cfg['DB_HOST']) { $cfg['DB_HOST'] } else { '127.0.0.1' }
-$dbPort = if ($cfg['DB_PORT']) { $cfg['DB_PORT'] } else { '5432' }
-$dbName = if ($cfg['DB_DATABASE']) { $cfg['DB_DATABASE'] } else { 'hassani_erp' }
-$dbUser = if ($cfg['DB_USERNAME']) { $cfg['DB_USERNAME'] } else { 'postgres' }
-$dbPass = $cfg['DB_PASSWORD']
-# SERVER_HOST=0.0.0.0 in .env lets other computers on the shop network open the app.
-$BindHost = if ($cfg['SERVER_HOST']) { $cfg['SERVER_HOST'] } else { '127.0.0.1' }
-
 $psql = (Get-Command psql -ErrorAction SilentlyContinue).Source
 if (-not $psql) { $psql = (Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin\psql.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1).FullName }
 if (-not $psql) {
@@ -220,7 +302,17 @@ if (-not $cfg['APP_KEY']) { & $php artisan key:generate --force | Out-Null; Say 
 & $php artisan migrate --force --seed 2>&1 | Tee-Object -FilePath (Join-Path $LogDir 'starter-migrate.log') | Select-Object -Last 3 | ForEach-Object { Say $_ 'DarkGray' }
 if ($LASTEXITCODE -ne 0) { Fail 'Updating the database failed. Details: storage\logs\starter-migrate.log' }
 & $php artisan optimize:clear | Out-Null
-& $php artisan optimize 2>&1 | Out-Null
+$eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+$optimizeOutput = & $php artisan optimize 2>&1
+$optimizeCode = $LASTEXITCODE
+$ErrorActionPreference = $eap
+if ($optimizeCode -ne 0) {
+    $optimizeOutput | Out-String | Set-Content (Join-Path $LogDir 'starter-optimize.log')
+    Say 'Note: "php artisan optimize" reported a problem, so some caches are missing and the app will be slower. Details: storage\logs\starter-optimize.log' 'DarkYellow'
+}
+# Remember that setup is done, so the next start can skip all of it until something changes.
+Get-SetupStamp $php | Set-Content $StampFile
+}
 
 # ---------------------------------------------------------------- 4. Start
 Step 'Starting Hassani ERP'
@@ -242,9 +334,9 @@ $procs | ForEach-Object { $_.Process.Id } | Set-Content $PidFile
 # Any HTTP answer (even a redirect or an error page) proves the server is up; the browser shows the rest.
 $ready = $false
 $script:LastProbeError = ''
-for ($i = 0; $i -lt 60; $i++) {
+for ($i = 0; $i -lt 200; $i++) {
     if ($procs[0].Process.HasExited) { break }
-    Start-Sleep -Milliseconds 1000
+    Start-Sleep -Milliseconds 300
     if ((Get-ServerStatus) -gt 0) { $ready = $true; break }
 }
 if (-not $ready) {
@@ -275,9 +367,10 @@ if ($chrome) {
 
 Write-Host ''
 Say '================================================================' 'Green'
-Say "  Hassani ERP is running at $Url" 'Green'
+Say ("  Hassani ERP is running at $Url   (ready in {0:n1}s)" -f $Clock.Elapsed.TotalSeconds) 'Green'
 if ($BindHost -ne '127.0.0.1') {
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127|169)\.' } | Select-Object -First 1).IPAddress
+    # The address of the Wi-Fi/cable adapter that has a gateway (not a VPN or virtual adapter).
+    $ip = (Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1).IPv4Address.IPAddress
     if ($ip) { Say "  Other computers in the shop: http://${ip}:$Port" 'Green' }
 } else {
     Say '  Other computers on the shop network: see README -> "Using more than one computer".' 'Green'

@@ -9,7 +9,7 @@ defineProps<{ label?: string; error?: string | null; hint?: string | null; requi
     <div>
         <label v-if="label" :for="$props.for" class="field-label">{{ t(label) }}<span v-if="required" class="text-ledger-red"> *</span></label>
         <slot />
-        <p v-if="error" class="mt-1 text-[13px] text-ledger-red" role="alert">{{ error }}</p>
+        <p v-if="error" class="mt-1 text-[13px] text-ledger-red" role="alert">{{ t(error) }}</p>
         <p v-else-if="hint" class="mt-1 text-[12.5px] text-ink-500">{{ t(hint) }}</p>
     </div>
 </template>

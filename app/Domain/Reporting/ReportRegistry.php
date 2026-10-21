@@ -2,6 +2,7 @@
 
 namespace App\Domain\Reporting;
 
+use App\Domain\Reporting\Catalog\ComplaintsCatalog;
 use App\Domain\Reporting\Catalog\FinanceCatalog;
 use App\Domain\Reporting\Catalog\InventoryCatalog;
 use App\Domain\Reporting\Catalog\SalesCatalog;
@@ -16,6 +17,7 @@ final class ReportRegistry
         'sales' => ['label' => 'Sales', 'label_ur' => 'فروخت'],
         'products' => ['label' => 'Products', 'label_ur' => 'مصنوعات'],
         'customers' => ['label' => 'Customers and Khata', 'label_ur' => 'گاہک اور کھاتہ'],
+        'complaints' => ['label' => 'Complaints', 'label_ur' => 'شکایات'],
         'payments' => ['label' => 'Payments and invoices', 'label_ur' => 'ادائیگیاں'],
         'agents' => ['label' => 'Sales agents and orders', 'label_ur' => 'سیلز ایجنٹ'],
         'pos' => ['label' => 'POS, shifts and riders', 'label_ur' => 'پی او ایس'],
@@ -35,7 +37,7 @@ final class ReportRegistry
     {
         if (self::$reports === null) {
             self::$reports = [];
-            foreach ([...SalesCatalog::reports(), ...InventoryCatalog::reports(), ...FinanceCatalog::reports()] as $definition) {
+            foreach ([...SalesCatalog::reports(), ...InventoryCatalog::reports(), ...FinanceCatalog::reports(), ...ComplaintsCatalog::reports()] as $definition) {
                 self::$reports[$definition['key']] = new DefinedReport($definition);
             }
         }

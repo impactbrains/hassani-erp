@@ -1,11 +1,11 @@
 import '../css/app.css';
-import { createInertiaApp, router } from '@inertiajs/vue3';
+import { createInertiaApp } from '@inertiajs/vue3';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
 import type { DefineComponent } from 'vue';
 import { createApp, h } from 'vue';
 import { ZiggyVue } from '../../vendor/tightenco/ziggy';
 import AppLayout from './layouts/AppLayout.vue';
-import { applyDocumentLocale, t } from './lib/i18n';
+import { installLocaleSync, t } from './lib/i18n';
 
 const appName = import.meta.env.VITE_APP_NAME || 'Hassani ERP';
 
@@ -23,8 +23,7 @@ createInertiaApp({
         return page;
     },
     setup({ el, App, props, plugin }) {
-        applyDocumentLocale((props.initialPage.props.locale as 'en' | 'ur') ?? 'en');
-        router.on('navigate', (event) => applyDocumentLocale((event.detail.page.props.locale as 'en' | 'ur') ?? 'en'));
+        installLocaleSync((props.initialPage.props.locale as 'en' | 'ur') ?? 'en');
         const app = createApp({ render: () => h(App, props) }).use(plugin).use(ZiggyVue);
         app.config.globalProperties.t = t;
         app.mount(el);

@@ -11,11 +11,20 @@ import { attendanceStatus, clock, minutes } from '@/lib/hr';
 import { localName, t } from '@/lib/i18n';
 
 /** "My work": clock in/out, my shifts, leave, payslips and Peshgi. */
-const props = defineProps<{ employee: any | null; today?: any; attendance?: any[]; shifts?: any[]; leave?: any[]; leaveTypes?: any[]; payslips?: any[]; advances?: any[] }>();
+const props = defineProps<{ employee: any | null; today?: any; breaksToday?: any[]; attendance?: any[]; shifts?: any[]; leave?: any[]; leaveTypes?: any[]; payslips?: any[]; advances?: any[] }>();
 function punch(direction: 'in' | 'out') {
     router.post(route('hr.attendance.punch'), { direction }, { preserveScroll: true });
 }
-const modal = ref<'' | 'leave' | 'advance' | 'fix'>('');
+const modal = ref<'' | 'leave' | 'advance' | 'fix' | 'break'>('');
+const openBreak = () => (props.breaksToday ?? []).find((b: any) => !b.ended_at);
+const breakTotal = () => (props.breaksToday ?? []).reduce((n: number, b: any) => n + (b.minutes || 0), 0);
+function startBreak(type: string) {
+    router.post(route('hr.breaks.start'), { type }, { preserveScroll: true });
+}
+function endBreak() {
+    router.post(route('hr.breaks.end', openBreak().id), {}, { preserveScroll: true });
+}
+const breakForm = useForm({ date: todayStr(), type: 'meal', from: '', to: '', unpaid: false, note: '' });
 const leaveForm = useForm({ leave_type_id: props.leaveTypes?.[0]?.id ?? null, start_date: todayStr(), end_date: todayStr(), half_day: false, reason: '' });
 const next = new Date();
 next.setMonth(next.getMonth() + 1);
@@ -36,9 +45,20 @@ const done = { preserveScroll: true, onSuccess: () => (modal.value = '') };
                     <template v-else>{{ t('Not clocked in yet') }}</template>
                 </div>
                 <div v-if="today?.late_minutes" class="text-sm text-haldi-800">{{ minutes(today.late_minutes) }} {{ t('late') }}</div>
+                <div v-if="openBreak()" class="text-sm text-haldi-800">{{ t('On a break since') }} {{ clock(openBreak().started_at) }}</div>
+                <div v-else-if="breakTotal()" class="text-sm text-ink-600">{{ t('Breaks today') }}: {{ minutes(breakTotal()) }}</div>
             </div>
             <Button v-if="!today?.clock_in_at" variant="primary" size="lg" @click="punch('in')">{{ t('Clock in') }}</Button>
-            <Button v-else-if="!today?.clock_out_at" size="lg" @click="punch('out')">{{ t('Clock out') }}</Button>
+            <template v-else-if="!today?.clock_out_at">
+                <Button v-if="openBreak()" variant="primary" size="lg" @click="endBreak">{{ t('End break') }}</Button>
+                <template v-else>
+                    <Button size="lg" @click="startBreak('meal')">{{ t('Meal break') }}</Button>
+                    <Button size="lg" @click="startBreak('prayer')">{{ t('Prayer break') }}</Button>
+                    <Button size="lg" variant="ghost" @click="startBreak('other')">{{ t('Other break') }}</Button>
+                </template>
+                <Button size="lg" @click="punch('out')">{{ t('Clock out') }}</Button>
+            </template>
+            <Button v-if="today?.clock_in_at" variant="ghost" @click="modal = 'break'">{{ t('Add a missed break') }}</Button>
             <Button variant="ghost" @click="modal = 'fix'">{{ t('Wrong time?') }}</Button>
         </section>
         <div class="grid gap-5 lg:grid-cols-3">
@@ -92,5 +112,14 @@ const done = { preserveScroll: true, onSuccess: () => (modal.value = '') };
             <Field label="Reason" :error="fixForm.errors.reason"><input v-model="fixForm.reason" class="input" /></Field>
         </div>
         <template #footer><Button @click="modal = ''">{{ t('Cancel') }}</Button><Button variant="primary" :loading="fixForm.processing" @click="fixForm.transform((d) => ({ ...d, clock_in: d.clock_in || null, clock_out: d.clock_out || null })).post(route('hr.attendance.corrections'), done)">{{ t('Request') }}</Button></template>
+    </Modal>
+    <Modal :open="modal === 'break'" :title="t('Add a missed break')" size="sm" @close="modal = ''">
+        <div class="space-y-3">
+            <Field label="Date" :error="breakForm.errors.date"><input v-model="breakForm.date" type="date" class="input" /></Field>
+            <Field label="Type"><select v-model="breakForm.type" class="input"><option value="meal">{{ t('Meal') }}</option><option value="prayer">{{ t('Prayer') }}</option><option value="other">{{ t('Other') }}</option></select></Field>
+            <div class="grid grid-cols-2 gap-3"><Field label="From" :error="breakForm.errors.from"><input v-model="breakForm.from" type="time" class="input" /></Field><Field label="To" :error="breakForm.errors.to"><input v-model="breakForm.to" type="time" class="input" /></Field></div>
+            <p class="text-[12.5px] text-ink-500">{{ t('Your manager can see that you entered this yourself.') }}</p>
+        </div>
+        <template #footer><Button @click="modal = ''">{{ t('Cancel') }}</Button><Button variant="primary" :loading="breakForm.processing" @click="breakForm.post(route('hr.breaks.store'), done)">{{ t('Save') }}</Button></template>
     </Modal>
 </template>

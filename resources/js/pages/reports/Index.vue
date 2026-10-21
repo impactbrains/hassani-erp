@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { Link, router } from '@inertiajs/vue3';
-import { Lock, Star } from 'lucide-vue-next';
+import { Clock, Lock, Star } from 'lucide-vue-next';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
 import { localName, t } from '@/lib/i18n';
@@ -30,11 +30,11 @@ function star(r: any) {
     <div v-if="!q && (favorites.length || recentReports.length)" class="mb-6 grid gap-4 md:grid-cols-2">
         <section v-if="favorites.length" class="panel p-4">
             <h3 class="mb-2">{{ t('Starred') }}</h3>
-            <ul class="space-y-1"><li v-for="r in favorites" :key="r.key"><Link :href="route('reports.show', r.key)" class="link">{{ localName(r) }}</Link></li></ul>
+            <div class="flex flex-wrap gap-2"><Link v-for="r in favorites" :key="r.key" :href="route('reports.show', r.key)" class="inline-flex items-center gap-1.5 rounded-full border border-haldi-300 bg-haldi-50 px-3 py-1 text-[13px] font-medium text-haldi-800 transition hover:border-haldi-500"><Star class="h-3.5 w-3.5 text-haldi-500" fill="currentColor" />{{ localName(r) }}</Link></div>
         </section>
         <section v-if="recentReports.length" class="panel p-4">
             <h3 class="mb-2">{{ t('Recently opened') }}</h3>
-            <ul class="space-y-1"><li v-for="r in recentReports" :key="r.key"><Link :href="route('reports.show', r.key)" class="link">{{ localName(r) }}</Link></li></ul>
+            <div class="flex flex-wrap gap-2"><Link v-for="r in recentReports" :key="r.key" :href="route('reports.show', r.key)" class="inline-flex items-center gap-1.5 rounded-full border border-ink-200 bg-white px-3 py-1 text-[13px] font-medium text-ink-800 transition hover:border-ink-400 hover:bg-ink-50"><Clock class="h-3.5 w-3.5 text-ink-400" />{{ localName(r) }}</Link></div>
         </section>
     </div>
 

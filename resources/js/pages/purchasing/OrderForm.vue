@@ -6,7 +6,14 @@ import Button from '@/components/ui/Button.vue';
 import Field from '@/components/form/Field.vue';
 import ContactPicker from '@/components/app/ContactPicker.vue';
 import LineEditor from '@/components/app/LineEditor.vue';
+import { round2 } from '@/lib/format';
 import { t } from '@/lib/i18n';
+
+/** A new line starts at the product's Purchase price (or what was paid last time), for the pack chosen. */
+const startingCost = (p: any, u: any) => {
+    const perUnit = p.purchase_price ?? p.last_cost?.per_unit ?? null;
+    return perUnit !== null ? String(round2(Number(perUnit) * Number(u?.factor ?? 1))) : '';
+};
 
 /** prefill (from Reorder): { supplier?: {id,name}, lines: [{variant_id, variant_unit_id, quantity, unit_price?, name, sku, unit_name}] } */
 const props = defineProps<{ order: any | null; prefill: any }>();
@@ -35,7 +42,7 @@ function submit() {
         <Field label="Expected delivery"><input v-model="form.expected_date" type="date" class="input" /></Field>
         <Field label="Notes"><input v-model="form.notes" class="input" /></Field>
     </section>
-    <LineEditor v-model="form.lines" purpose="purchase" price-field="unit_price" :default-price="() => ''" :errors="form.errors" :fields="[{ key: 'unit_price', label: 'Cost per pack', type: 'number', width: 'w-28' }, { key: 'tax_rate', label: 'Tax %', type: 'number', width: 'w-20', default: '0' }]" />
+    <LineEditor v-model="form.lines" purpose="purchase" price-field="unit_price" :default-price="startingCost" :errors="form.errors" :fields="[{ key: 'unit_price', label: 'Cost per pack', type: 'number', width: 'w-28' }, { key: 'tax_rate', label: 'Tax %', type: 'number', width: 'w-20', default: '0' }]" />
     <div class="mt-4 flex items-center gap-2">
         <p v-for="(e, k) in form.errors" :key="k" class="text-sm text-ledger-red">{{ e }}</p>
         <div class="ms-auto flex gap-2"><Button :href="o ? route('purchasing.orders.show', o.id) : route('purchasing.orders.index')">{{ t('Cancel') }}</Button><Button variant="primary" :disabled="!form.lines.length || !form.supplier_id" :loading="form.processing" @click="submit">{{ t('Save') }}</Button></div>

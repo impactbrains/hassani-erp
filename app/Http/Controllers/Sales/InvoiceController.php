@@ -9,6 +9,7 @@ use App\Models\CreditNote;
 use App\Models\ReasonCode;
 use App\Models\SalesInvoice;
 use App\Models\Shift;
+use App\Support\Pager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -20,17 +21,25 @@ class InvoiceController extends Controller
 {
     public function index(Request $request): Response
     {
+        Pager::remember($request, 'sales.invoices');
+        $invoices = $this->listQuery($request)->with('store:id,name', 'cashier:id,name')->paginate($this->perPage($request))->withQueryString();
+
+        return Inertia::render('sales/Invoices', ['invoices' => $invoices, 'filters' => $request->only(['q', 'payment_status', 'kind', 'from', 'to'])]);
+    }
+
+    /** The receipts list as filtered on screen. The next / previous arrows on a receipt walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
         $stores = $request->user()->storeIdsFor('sales.invoices.view');
         $q = trim((string) $request->query('q'));
-        $invoices = SalesInvoice::query()->whereIn('store_id', $stores)->where('status', 'posted')->with('store:id,name', 'cashier:id,name')
+
+        return SalesInvoice::query()->whereIn('store_id', $stores)->where('status', 'posted')
             ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('number', 'ilike', "%{$q}%")->orWhere('customer_name', 'ilike', "%{$q}%")))
             ->when($request->query('payment_status'), fn ($w, $s) => $w->where('payment_status', $s))
             ->when($request->query('kind'), fn ($w, $k) => $w->where('kind', $k))
             ->when($request->query('from'), fn ($w, $d) => $w->where('business_date', '>=', $d))
             ->when($request->query('to'), fn ($w, $d) => $w->where('business_date', '<=', $d))
-            ->latest('id')->paginate($this->perPage($request))->withQueryString();
-
-        return Inertia::render('sales/Invoices', ['invoices' => $invoices, 'filters' => $request->only(['q', 'payment_status', 'kind', 'from', 'to'])]);
+            ->latest('id');
     }
 
     public function show(Request $request, SalesInvoice $invoice, ReceiptData $receipts): Response
@@ -41,6 +50,7 @@ class InvoiceController extends Controller
 
         return Inertia::render('sales/InvoiceShow', [
             'invoice' => $invoice,
+            'pager' => Pager::for($request, 'sales.invoices', $invoice->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('sales.invoices.show', $id)),
             'receipt' => $receipts->forInvoice($invoice),
             'showCost' => $user->hasPermission('catalog.costs.view'),
             'canReturn' => $user->hasPermission('pos.refund', $invoice->store_id) || $user->hasPermission('sales.credit_notes.create', $invoice->store_id),

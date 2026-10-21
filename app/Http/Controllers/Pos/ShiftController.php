@@ -7,6 +7,7 @@ use App\Domain\Pos\ShiftService;
 use App\Http\Controllers\Controller;
 use App\Models\Register;
 use App\Models\Shift;
+use App\Support\Pager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -17,15 +18,23 @@ class ShiftController extends Controller
 {
     public function index(Request $request): Response
     {
+        Pager::remember($request, 'pos.shifts');
+        $shifts = $this->listQuery($request)->with(['register:id,name', 'opener:id,name', 'store:id,name'])->paginate($this->perPage($request))->withQueryString();
+
+        return Inertia::render('pos/Shifts', ['shifts' => $shifts, 'filters' => $request->only(['status', 'variance'])]);
+    }
+
+    /** The shifts list as filtered on screen. The next / previous arrows on a shift walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
         $user = $request->user();
         $stores = $user->storeIdsFor('pos.shift.view_all');
-        $shifts = Shift::query()->with(['register:id,name', 'opener:id,name', 'store:id,name'])
+
+        return Shift::query()
             ->where(fn ($q) => $q->whereIn('store_id', $stores)->orWhere('opened_by', $user->id))
             ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
             ->when($request->query('variance') === 'pending', fn ($q) => $q->where('variance_status', 'pending_review'))
-            ->latest('opened_at')->paginate($this->perPage($request))->withQueryString();
-
-        return Inertia::render('pos/Shifts', ['shifts' => $shifts, 'filters' => $request->only(['status', 'variance'])]);
+            ->latest('opened_at')->latest('id');
     }
 
     public function show(Request $request, Shift $shift, ShiftReport $reports): Response
@@ -33,6 +42,7 @@ class ShiftController extends Controller
         $this->canSee($request, $shift);
 
         return Inertia::render('pos/ShiftShow', [
+            'pager' => Pager::for($request, 'pos.shifts', $shift->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('pos.shifts.show', $id)),
             'shift' => $shift->load('register:id,name', 'opener:id,name', 'closer:id,name'),
             'report' => $shift->status === 'closed' && $shift->z_snapshot ? $shift->z_snapshot : $reports->build($shift),
             'canReview' => $request->user()->hasPermission('pos.shift.approve_variance', $shift->store_id) && $shift->variance_status === 'pending_review' && $shift->opened_by !== $request->user()->id,

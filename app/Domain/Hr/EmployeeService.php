@@ -36,6 +36,8 @@ final class EmployeeService
         'reinstate' => ['from' => ['suspended'], 'to' => 'active', 'event' => 'reinstated'],
         'resign' => ['from' => ['active', 'probation', 'suspended', 'onboarding'], 'to' => 'resigned', 'event' => 'resigned'],
         'terminate' => ['from' => ['active', 'probation', 'suspended', 'onboarding'], 'to' => 'terminated', 'event' => 'terminated'],
+        // A rehire starts a new employment period: the joining date becomes the effective date, the old exit is cleared.
+        'rehire' => ['from' => ['resigned', 'terminated'], 'to' => 'onboarding', 'event' => 'rehired'],
     ];
 
     public function __construct(private readonly UserAccountService $accounts)
@@ -89,7 +91,7 @@ final class EmployeeService
     }
 
     /** Applies a lifecycle step (confirm, suspend, resign ...). Exits deactivate the linked login. */
-    public function transition(User $user, Contact $employee, string $action, string $effectiveDate, ?string $note = null): Contact
+    public function transition(User $user, Contact $employee, string $action, string $effectiveDate, ?string $note = null, ?string $insights = null): Contact
     {
         if (! $user->hasPermission('hr.employees.lifecycle')) {
             throw new BusinessRuleException('You are not allowed to change employment status.', 'not_permitted');
@@ -100,7 +102,7 @@ final class EmployeeService
             throw new BusinessRuleException("An employee who is {$detail->status} cannot be {$step['event']}.", 'invalid_transition');
         }
 
-        return DB::transaction(function () use ($user, $employee, $detail, $step, $effectiveDate, $note) {
+        return DB::transaction(function () use ($user, $employee, $detail, $step, $effectiveDate, $note, $insights) {
             $detail->status = $step['to'];
             if ($step['to'] === 'active' && $step['event'] === 'confirmed') {
                 $detail->confirmation_date = $effectiveDate;
@@ -116,11 +118,48 @@ final class EmployeeService
             if ($step['to'] === 'suspended' && $employee->user) {
                 $this->accounts->suspendForHr($user, $employee->user, 'Employee suspended');
             }
+            if ($step['event'] === 'reinstated' && $employee->user && $employee->user->status === User::STATUS_SUSPENDED) {
+                $this->accounts->reactivateForHr($user, $employee->user, 'Employee reinstated');
+            }
+            $details = [];
+            if ($step['event'] === 'rehired') {
+                // Keep the finished period's facts (and the employer's insights) on the history before clearing them.
+                $details = ['previous_period' => ['joining_date' => $detail->joining_date?->toDateString(), 'exit_date' => $detail->exit_date?->toDateString(), 'exit_reason' => $detail->exit_reason, 'employer_insights' => $detail->employer_insights]];
+                $detail->joining_date = $effectiveDate;
+                $detail->probation_end_date = null;
+                $detail->confirmation_date = null;
+                $detail->exit_date = null;
+                $detail->exit_reason = null;
+                $detail->employer_insights = null;
+                $detail->insights_by = null;
+                $detail->insights_at = null;
+                $employee->update(['is_active' => true]);
+                if ($employee->user && $employee->user->status !== User::STATUS_ACTIVE) {
+                    $this->accounts->reactivateForHr($user, $employee->user, 'Employee rehired');
+                }
+            }
+            if ($insights !== null && trim($insights) !== '' && in_array($step['to'], ['resigned', 'terminated'], true)) {
+                $detail->employer_insights = trim($insights);
+                $detail->insights_by = $user->id;
+                $detail->insights_at = now();
+            }
             $detail->save();
-            $this->recordEvent($user, $employee, $step['event'], $effectiveDate, $note);
+            $this->recordEvent($user, $employee, $step['event'], $effectiveDate, $note, $details);
 
             return $employee->fresh('employeeDetail');
         });
+    }
+
+    /** The employer's own notes about this person (kept private to HR managers, included in the leaving export). */
+    public function saveInsights(User $user, Contact $employee, ?string $insights): void
+    {
+        if (! $user->hasPermission('hr.employees.lifecycle')) {
+            throw new BusinessRuleException('You are not allowed to write employer insights.', 'not_permitted');
+        }
+        $detail = $employee->employeeDetail ?? throw new BusinessRuleException('This employee has no HR record yet.', 'no_detail');
+        $insights = $insights !== null ? trim($insights) : null;
+        $detail->forceFill(['employer_insights' => $insights === '' ? null : $insights, 'insights_by' => $user->id, 'insights_at' => now()])->save();
+        Audit::record('hr.insights_saved', "Employer insights for {$employee->name} updated", $employee);
     }
 
     public function transfer(User $user, Contact $employee, ?int $storeId, ?int $departmentId, ?int $positionId, string $effectiveDate, ?string $note): Contact

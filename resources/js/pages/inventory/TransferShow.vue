@@ -8,7 +8,7 @@ import { useOptions } from '@/composables/useOptions';
 import { dateTime, qty } from '@/lib/format';
 import { localName, t } from '@/lib/i18n';
 
-const props = defineProps<{ transfer: any; can: { approve: boolean; dispatch: boolean; receive: boolean } }>();
+const props = defineProps<{ pager?: any; transfer: any; can: { approve: boolean; dispatch: boolean; receive: boolean } }>();
 const options = useOptions(['reasons:transfer_discrepancy']);
 const s = computed(() => props.transfer.status);
 const entry = reactive<Record<number, { quantity: string; reason_id: number | null; note: string }>>({});
@@ -27,7 +27,7 @@ const short = (l: any) => s.value === 'dispatched' && Number(entry[l.id]?.quanti
 </script>
 
 <template>
-    <PageHeader :title="`${t('Transfer')} ${transfer.number}`" :subtitle="`${transfer.from_store?.name} · ${transfer.from_location?.name} → ${transfer.to_store?.name} · ${transfer.to_location?.name}`">
+    <PageHeader :pager="pager" :title="`${t('Transfer')} ${transfer.number}`" :subtitle="`${transfer.from_store?.name} · ${transfer.from_location?.name} → ${transfer.to_store?.name} · ${transfer.to_location?.name}`">
         <template #actions><Badge :status="transfer.status" /><Button :href="route('inventory.transfers.index')">{{ t('All transfers') }}</Button></template>
     </PageHeader>
     <section class="panel mb-5 grid gap-4 p-4 text-sm md:grid-cols-4">

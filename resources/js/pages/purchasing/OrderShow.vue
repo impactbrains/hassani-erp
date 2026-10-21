@@ -9,7 +9,7 @@ import Modal from '@/components/ui/Modal.vue';
 import { date, dateTime, money, qty } from '@/lib/format';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ order: any; can: { manage: boolean; approve: boolean; receive: boolean } }>();
+const props = defineProps<{ pager?: any; order: any; can: { manage: boolean; approve: boolean; receive: boolean } }>();
 const s = () => props.order.status;
 const reasonFor = ref<'' | 'cancel' | 'close'>('');
 const reason = ref('');
@@ -23,7 +23,7 @@ const received = (l: any) => Number(l.base_quantity_received) / Number(l.unit_fa
 </script>
 
 <template>
-    <PageHeader :title="`${t('Purchase order')} ${order.number}`" :subtitle="`${order.supplier?.name} · ${date(order.order_date)} · ${order.store?.name}`">
+    <PageHeader :pager="pager" :title="`${t('Purchase order')} ${order.number}`" :subtitle="`${order.supplier?.name} · ${date(order.order_date)} · ${order.store?.name}`">
         <template #actions>
             <Badge :status="order.status" />
             <Button @click="print"><Printer class="h-4 w-4" />{{ t('Print') }}</Button>

@@ -6,6 +6,7 @@ use App\Domain\Inventory\CountService;
 use App\Http\Controllers\Controller;
 use App\Models\StockCount;
 use App\Models\StockCountLine;
+use App\Support\Pager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -17,14 +18,20 @@ class CountController extends Controller
 {
     public function index(Request $request): Response
     {
-        $stores = $request->user()->storeIdsFor('inventory.counts.count');
+        Pager::remember($request, 'inventory.counts');
 
         return Inertia::render('inventory/Counts', [
-            'counts' => StockCount::query()->whereIn('store_id', $stores)->with('store:id,name', 'assignee:id,name', 'creator:id,name')->withCount('lines')
-                ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))->latest('id')->paginate($this->perPage($request))->withQueryString(),
+            'counts' => $this->listQuery($request)->with('store:id,name', 'assignee:id,name', 'creator:id,name')->withCount('lines')->paginate($this->perPage($request))->withQueryString(),
             'filters' => $request->only(['status']),
             'canPlan' => $request->user()->hasPermission('inventory.counts.manage', $this->currentStore($request)),
         ]);
+    }
+
+    /** The counts list as filtered on screen. The next / previous arrows on a count walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        return StockCount::query()->whereIn('store_id', $request->user()->storeIdsFor('inventory.counts.count'))
+            ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))->latest('id');
     }
 
     public function store(Request $request, CountService $counts): RedirectResponse
@@ -51,6 +58,7 @@ class CountController extends Controller
         }
 
         return Inertia::render('inventory/CountShow', [
+            'pager' => Pager::for($request, 'inventory.counts', $count->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('inventory.counts.show', $id)),
             'count' => $count,
             'hideExpected' => $hideExpected,
             'needsSecondCount' => $count->status === 'submitted' ? $counts->linesNeedingSecondCount($count)->pluck('id') : [],

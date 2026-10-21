@@ -40,6 +40,7 @@ final class SalesOrderService
 {
     public function __construct(
         private readonly PriceResolver $prices,
+        private readonly \App\Domain\Catalog\PriceRules $rules,
         private readonly TaxResolver $taxes,
         private readonly CartPricer $pricer,
         private readonly Availability $availability,
@@ -102,29 +103,42 @@ final class SalesOrderService
 
             $pricerLines = [];
             $rows = [];
-            foreach ($data['lines'] as $index => $raw) {
+            $prepared = [];
+            foreach (array_values($data['lines']) as $index => $raw) {
                 $variant = ProductVariant::query()->with('product', 'units.unit')->where('is_active', true)->findOrFail($raw['variant_id']);
                 $unit = $variant->units->firstWhere('id', (int) $raw['variant_unit_id']);
                 if ($unit === null || ! $unit->can_sell) {
                     throw new BusinessRuleException("{$variant->displayName()} cannot be sold in that pack size.", 'unit_not_sellable');
                 }
                 $quantity = Decimal::qty($raw['quantity']);
-                $base = Units::toBase($quantity, $unit);
                 $resolved = $this->prices->resolve($variant, $unit, $priceBookId, $quantity);
                 if ($resolved === null) {
                     throw new BusinessRuleException("{$variant->displayName()} has no price for this customer.", 'price_missing');
                 }
-                $unitPrice = $resolved['price'];
-                if (isset($raw['unit_price']) && $raw['unit_price'] !== null && ! Decimal::eq($raw['unit_price'], $unitPrice)) {
+                $prepared[$index] = ['raw' => $raw, 'variant' => $variant, 'unit' => $unit, 'quantity' => $quantity, 'base_quantity' => Units::toBase($quantity, $unit), 'baseline' => $resolved['price']];
+            }
+            // Price rules apply to orders taken by staff. Orders from the website / app (API) keep the online prices.
+            $fromApi = ! empty($data['api_client_id']) || ($data['channel'] ?? null) === 'ecommerce';
+            $ruled = $fromApi ? [] : $this->rules->apply($prepared, new \App\Domain\Catalog\PriceContext($store->id, $customer, $date));
+            foreach ($prepared as $index => ['raw' => $raw, 'variant' => $variant, 'unit' => $unit, 'quantity' => $quantity, 'base_quantity' => $base, 'baseline' => $baseline]) {
+                $unitPrice = $ruled[$index]['price'] ?? $baseline;
+                $ruleId = $ruled[$index]['rule_id'] ?? null;
+                // The order form fills each line with the plain list price; that is not a price change when a rule lowered it.
+                $sent = isset($raw['unit_price']) && $raw['unit_price'] !== null && $raw['unit_price'] !== '' ? Decimal::money($raw['unit_price']) : null;
+                if ($sent !== null && $ruleId !== null && Decimal::eq($sent, $baseline)) {
+                    $sent = null;
+                }
+                if ($sent !== null && ! Decimal::eq($sent, $unitPrice)) {
                     if (! $user?->hasPermission('catalog.prices.manage', $store->id) && ! $user?->hasPermission('pos.price.override', $store->id)) {
                         throw new BusinessRuleException('You are not allowed to change prices on orders.', 'price_override_not_permitted');
                     }
-                    $unitPrice = Decimal::money($raw['unit_price']);
+                    $unitPrice = $sent;
+                    $ruleId = null;
                 }
                 $tax = $this->taxes->for($variant->product, $date);
                 $discount = isset($raw['discount']) && $raw['discount'] !== '' && $raw['discount'] !== null ? ['type' => 'amount', 'value' => (string) $raw['discount']] : null;
                 $pricerLines[] = ['key' => $index, 'unit_price' => $unitPrice, 'quantity' => $quantity, 'discount' => $discount, 'tax_rate' => $tax['rate'], 'tax_inclusive' => $tax['inclusive']];
-                $rows[] = compact('variant', 'unit', 'quantity', 'base', 'unitPrice', 'tax');
+                $rows[] = compact('variant', 'unit', 'quantity', 'base', 'unitPrice', 'tax', 'ruleId');
             }
             $pricing = $this->pricer->price($pricerLines);
             if (Decimal::gt($pricing['max_discount_percent'], (string) Settings::get('pricing.max_discount_percent', $store->id))
@@ -147,6 +161,7 @@ final class SalesOrderService
                     'tax_inclusive' => $row['tax']['inclusive'],
                     'tax_amount' => $priced['tax_amount'],
                     'line_total' => $priced['line_total'],
+                    'price_rule_id' => $row['ruleId'],
                 ]);
             }
             $order->update([
@@ -250,6 +265,7 @@ final class SalesOrderService
                     listPrice: $line->unit_price, unitPrice: $line->unit_price, taxRate: $line->tax_rate, taxInclusive: $line->tax_inclusive,
                     discount: Decimal::isPositive($line->discount_amount) ? ['type' => 'amount', 'value' => $line->discount_amount] : null,
                     salesOrderLineId: $line->id,
+                    priceRuleId: $line->price_rule_id,
                 );
                 $line->update(['base_quantity_invoiced' => Decimal::qty(Decimal::add($line->base_quantity_invoiced, $remaining))]);
             }

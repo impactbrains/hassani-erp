@@ -6,10 +6,11 @@ import Button from '@/components/ui/Button.vue';
 import Badge from '@/components/ui/Badge.vue';
 import Field from '@/components/form/Field.vue';
 import RoleRows from '@/components/app/RoleRows.vue';
+import UserPermissions from '@/components/app/UserPermissions.vue';
 import { dateTime } from '@/lib/format';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ account: any; effective: Record<string, any>; sessions: any[]; logins: any[]; canManage: boolean; isSelf: boolean; roles: any[]; stores: any[]; employees: any[] }>();
+const props = defineProps<{ pager?: any; account: any; effective: Record<string, any>; sessions: any[]; logins: any[]; canManage: boolean; isSelf: boolean; permissionRows: any[]; isOwnerAccount: boolean; canPermissions: boolean; roles: any[]; stores: any[]; employees: any[] }>();
 const form = useForm({
     name: props.account.name, locale: props.account.locale ?? 'en',
     roles: (props.account.roleAssignments ?? props.account.role_assignments ?? []).map((a: any) => ({ role_id: a.role_id, store_id: a.store_id, expires_at: a.expires_at ? String(a.expires_at).slice(0, 10) : '', reason: a.reason ?? '' })),
@@ -26,7 +27,7 @@ function act(action: string) {
 </script>
 
 <template>
-    <PageHeader :title="account.name" :subtitle="account.email">
+    <PageHeader :pager="pager" :title="account.name" :subtitle="account.email">
         <template #actions><Badge :status="account.status" /><Button :href="route('settings.users.index')">{{ t('All users') }}</Button></template>
     </PageHeader>
     <div class="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -42,7 +43,8 @@ function act(action: string) {
             </div>
             <div v-if="canManage" class="flex justify-end"><Button variant="primary" :loading="form.processing" @click="save">{{ t('Save') }}</Button></div>
         </section>
-        <aside class="space-y-5">
+        <UserPermissions class="lg:col-span-2" :user-id="account.id" :rows="permissionRows" :stores="stores" :can-edit="canPermissions" :is-owner="isOwnerAccount" :is-self="isSelf" />
+        <aside class="space-y-5 lg:col-start-2 lg:row-start-1">
             <section class="panel space-y-2 p-4 text-sm">
                 <div>{{ t('Last sign-in') }}: {{ account.last_login_at ? dateTime(account.last_login_at) : '—' }}</div>
                 <div>{{ t('Approval PIN') }}: {{ account.has_pin ? t('Set') : t('Not set') }}</div>

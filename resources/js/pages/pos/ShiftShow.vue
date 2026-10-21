@@ -8,7 +8,7 @@ import ShiftReportView from '@/components/pos/ShiftReportView.vue';
 import { money } from '@/lib/format';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ shift: any; report: any; canReview: boolean }>();
+const props = defineProps<{ pager?: any; shift: any; report: any; canReview: boolean }>();
 const review = useForm({ note: '' });
 function print() {
     window.print();
@@ -16,7 +16,7 @@ function print() {
 </script>
 
 <template>
-    <PageHeader :title="`${t('Shift')} ${shift.number}`" :subtitle="`${shift.register?.name} · ${shift.opener?.name}`">
+    <PageHeader :pager="pager" :title="`${t('Shift')} ${shift.number}`" :subtitle="`${shift.register?.name} · ${shift.opener?.name}`">
         <template #actions>
             <Badge :status="shift.status" />
             <Button @click="print"><Printer class="h-4 w-4" />{{ t('Print') }}</Button>

@@ -12,7 +12,7 @@ import { date, money } from '@/lib/format';
 import { can as hasPerm } from '@/lib/perms';
 import { localName, t } from '@/lib/i18n';
 
-const props = defineProps<{ run: any; payslips: any[]; can: { approve: boolean } }>();
+const props = defineProps<{ pager?: any; run: any; payslips: any[]; can: { approve: boolean } }>();
 const options = useOptions(['payment_methods']);
 const methods = computed(() => (options.payment_methods ?? []).filter((m: any) => ['cash', 'bank', 'wallet'].includes(m.type)));
 const open = ref<number | null>(null);
@@ -27,7 +27,7 @@ const lines = (p: any, type: string) => p.lines.filter((l: any) => l.type === ty
 </script>
 
 <template>
-    <PageHeader :title="`${t('Payroll')} ${run.number}`" :subtitle="`${date(run.period_start)} – ${date(run.period_end)} · ${run.store?.name ?? t('All stores')}`">
+    <PageHeader :pager="pager" :title="`${t('Payroll')} ${run.number}`" :subtitle="`${date(run.period_start)} – ${date(run.period_end)} · ${run.store?.name ?? t('All stores')}`">
         <template #actions>
             <Badge :status="run.status" />
             <Button v-if="run.status === 'draft' && can.approve" variant="primary" @click="act('approve')">{{ t('Approve') }}</Button>

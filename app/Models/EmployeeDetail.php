@@ -24,6 +24,7 @@ class EmployeeDetail extends Model
         'exit_date' => 'date:Y-m-d',
         'cnic_expiry' => 'date:Y-m-d',
         'date_of_birth' => 'date:Y-m-d',
+        'insights_at' => 'datetime',
         'cnic' => 'encrypted',
         'bank_account' => 'encrypted',
     ];

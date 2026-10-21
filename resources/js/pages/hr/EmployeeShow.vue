@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { router, useForm, usePage } from '@inertiajs/vue3';
 import { FileText, Pencil, Plus, Trash2, Upload } from 'lucide-vue-next';
 import PageHeader from '@/components/ui/PageHeader.vue';
@@ -13,18 +13,24 @@ import { date, dateTime, money, today } from '@/lib/format';
 import { attendanceStatus, clock, docTypes, employmentTypes, minutes, roleTypes } from '@/lib/hr';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ employee: any; events: any[]; documents: any[] | null; attendance: any[]; leave: any[]; leaveBalances: any[]; payslips: any[] | null; salary: any[] | null; advances: any[] | null; logins: any[] | null; can: Record<string, boolean> }>();
+const props = defineProps<{ pager?: any; employee: any; events: any[]; documents: any[] | null; attendance: any[]; leave: any[]; leaveBalances: any[]; payslips: any[] | null; salary: any[] | null; advances: any[] | null; logins: any[] | null; can: Record<string, boolean> }>();
 const page = usePage<any>();
-const d = props.employee.employee_detail ?? {};
+// Computed, not a one-time copy: after terminate / rehire the page props change and everything below must follow.
+const d = computed<any>(() => props.employee.employee_detail ?? {});
 const tab = ref('overview');
 const modal = ref<'' | 'transition' | 'salary' | 'document' | 'login'>('');
-const steps: Record<string, string> = { start_probation: 'Start probation', confirm: 'Confirm (make permanent)', suspend: 'Suspend', reinstate: 'Reinstate', transfer: 'Transfer', resign: 'Resigned', terminate: 'Terminate' };
-const allowed: Record<string, string[]> = { onboarding: ['start_probation', 'confirm', 'resign', 'terminate', 'transfer'], probation: ['confirm', 'suspend', 'resign', 'terminate', 'transfer'], active: ['suspend', 'resign', 'terminate', 'transfer'], suspended: ['reinstate', 'resign', 'terminate'] };
-const tr = useForm({ action: '', effective_date: today(), note: '', store_id: d.store_id ?? null, department_id: d.department_id ?? null, job_position_id: d.job_position_id ?? null });
-const current = props.salary?.find((s: any) => !s.effective_to) ?? props.salary?.[0];
-const sal = useForm<any>({ effective_from: today(), pay_basis: current?.pay_basis ?? 'monthly', base_amount: current?.base_amount ?? '', overtime_hourly_rate: current?.overtime_hourly_rate ?? '', components: JSON.parse(JSON.stringify(current?.components ?? [])), eobi_employee: current?.eobi_employee ?? '', eobi_employer: current?.eobi_employer ?? '', social_security_employer: current?.social_security_employer ?? '' });
+const steps: Record<string, string> = { start_probation: 'Start probation', confirm: 'Confirm (make permanent)', suspend: 'Suspend', reinstate: 'Reinstate', transfer: 'Transfer', resign: 'Resigned', terminate: 'Terminate', rehire: 'Rehire (new employment period)' };
+const allowed: Record<string, string[]> = { onboarding: ['start_probation', 'confirm', 'resign', 'terminate', 'transfer'], probation: ['confirm', 'suspend', 'resign', 'terminate', 'transfer'], active: ['suspend', 'resign', 'terminate', 'transfer'], suspended: ['reinstate', 'resign', 'terminate'], resigned: ['rehire'], terminated: ['rehire'] };
+const tr = useForm({ action: '', effective_date: today(), note: '', insights: '', store_id: d.value.store_id ?? null, department_id: d.value.department_id ?? null, job_position_id: d.value.job_position_id ?? null });
+const current = computed(() => props.salary?.find((s: any) => !s.effective_to) ?? props.salary?.[0]);
+const sal = useForm<any>({ effective_from: today(), pay_basis: current.value?.pay_basis ?? 'monthly', base_amount: current.value?.base_amount ?? '', overtime_hourly_rate: current.value?.overtime_hourly_rate ?? '', components: JSON.parse(JSON.stringify(current.value?.components ?? [])), eobi_employee: current.value?.eobi_employee ?? '', eobi_employer: current.value?.eobi_employer ?? '', social_security_employer: current.value?.social_security_employer ?? '' });
 const doc = useForm<{ file: File | null; type: string; title: string; expires_on: string }>({ file: null, type: 'cnic', title: '', expires_on: '' });
 const loginId = ref<number | null>(null);
+const ins = useForm({ insights: d.value.employer_insights ?? '' });
+watch(() => d.value.employer_insights, (v) => ins.defaults({ insights: v ?? '' }).reset());
+function saveInsights() {
+    ins.post(route('hr.employees.insights', props.employee.id), { preserveScroll: true });
+}
 function openStep(a: string) {
     tr.action = a;
     modal.value = 'transition';
@@ -50,9 +56,13 @@ const leaveTotal = (l: any) => `${l.days} ${t('days')}`;
 </script>
 
 <template>
-    <PageHeader :title="employee.name" :subtitle="`${d.employee_no ?? ''} · ${d.job_title ?? t(roleTypes[d.role_type] ?? '')} · ${d.store?.name ?? ''}`">
+    <PageHeader :pager="pager" :title="employee.name" :subtitle="`${d.employee_no ?? ''} · ${d.job_title ?? t(roleTypes[d.role_type] ?? '')} · ${d.store?.name ?? ''}`">
         <template #actions>
             <Badge :status="d.status" />
+            <template v-if="can.export">
+                <a :href="route('hr.employees.export', { employee: employee.id, format: 'xlsx' })" class="inline-flex h-10 items-center rounded border border-ink-200 bg-white px-4 text-sm font-medium text-ink-800 hover:bg-ink-50">{{ t('Export Excel') }}</a>
+                <a :href="route('hr.employees.export', { employee: employee.id, format: 'print' })" target="_blank" class="inline-flex h-10 items-center rounded border border-ink-200 bg-white px-4 text-sm font-medium text-ink-800 hover:bg-ink-50">{{ t('Export PDF') }}</a>
+            </template>
             <Button v-if="can.manage" :href="route('hr.employees.edit', employee.id)"><Pencil class="h-4 w-4" />{{ t('Edit') }}</Button>
             <template v-if="can.lifecycle"><Button v-for="a in allowed[d.status] ?? []" :key="a" size="sm" :variant="['terminate'].includes(a) ? 'danger' : 'secondary'" @click="openStep(a)">{{ t(steps[a]) }}</Button></template>
         </template>
@@ -75,7 +85,7 @@ const leaveTotal = (l: any) => `${l.days} ${t('days')}`;
             <div><span class="field-label">{{ t('Mobile') }}</span>{{ employee.phone ?? '—' }}</div>
             <div><span class="field-label">{{ t('Address') }}</span>{{ employee.address ?? '—' }} {{ employee.city }}</div>
             <div><span class="field-label">{{ t('Emergency contact') }}</span>{{ d.emergency_contact_name ?? '—' }} {{ d.emergency_contact_phone }} <span class="text-ink-500">{{ d.emergency_contact_relation }}</span></div>
-            <div><span class="field-label">{{ t('Login') }}</span>{{ employee.user?.email ?? t('No login') }}<button v-if="!employee.user && can.users && logins?.length" class="link ms-2" @click="modal = 'login'">{{ t('Link a login') }}</button><a v-if="!employee.user && can.users" :href="route('settings.users.create')" class="link ms-2">{{ t('Create login') }}</a></div>
+            <div><span class="field-label">{{ t('Login') }}</span>{{ employee.user?.email ?? t('No login') }}<button v-if="!employee.user && can.users && logins?.length" class="link ms-2" @click="modal = 'login'">{{ t('Link a login') }}</button><a v-if="!employee.user && can.users" :href="route('hr.employees.edit', employee.id)" class="link ms-2">{{ t('Create login') }}</a></div>
         </section>
         <section v-if="can.sensitive" class="panel space-y-2 border-haldi-300 p-4 text-sm">
             <h3>{{ t('Private') }}</h3>
@@ -84,6 +94,11 @@ const leaveTotal = (l: any) => `${l.days} ${t('days')}`;
             <div><span class="field-label">{{ t('Date of birth') }}</span>{{ d.date_of_birth ? date(d.date_of_birth) : '—' }}</div>
             <div><span class="field-label">{{ t('Bank') }}</span>{{ d.bank_name ?? '—' }} {{ d.bank_account }}</div>
             <div><span class="field-label">EOBI / SESSI</span>{{ d.eobi_no ?? '—' }} / {{ d.social_security_no ?? '—' }}</div>
+        </section>
+        <section v-if="can.lifecycle" class="panel space-y-2 p-4 text-sm lg:col-span-3">
+            <h3>{{ t("Employer's insights") }}</h3>
+            <textarea v-model="ins.insights" rows="3" class="input" :placeholder="t('Private notes for HR managers. They are included in the leaving export.')" />
+            <div class="flex items-center gap-3"><Button size="sm" variant="primary" :loading="ins.processing" @click="saveInsights">{{ t('Save') }}</Button><span v-if="d.insights_at" class="text-[12px] text-ink-500">{{ t('Last saved') }} {{ dateTime(d.insights_at) }}</span></div>
         </section>
         <section class="panel p-4 text-sm lg:col-span-3" v-if="d.note"><span class="field-label">{{ t('Notes') }}</span><p class="whitespace-pre-line">{{ d.note }}</p></section>
     </div>
@@ -172,6 +187,9 @@ const leaveTotal = (l: any) => `${l.days} ${t('days')}`;
                 <Field label="Store"><select v-model="tr.store_id" class="input"><option v-for="s in page.props.auth?.stores ?? []" :key="s.id" :value="s.id">{{ s.name }}</option></select></Field>
             </template>
             <Field label="Note"><textarea v-model="tr.note" rows="2" class="input" /></Field>
+            <Field v-if="['resign', 'terminate'].includes(tr.action) && can.lifecycle" label="Employer's insights (optional)"><textarea v-model="tr.insights" rows="3" class="input" :placeholder="t('Your own notes about this person: strengths, concerns, would you rehire…')" /></Field>
+            <p v-if="tr.action === 'rehire'" class="text-[12.5px] text-haldi-800">{{ t('This starts a new employment period from the date above. The earlier period stays in the history, and their login is switched back on.') }}</p>
+            <p v-if="['resign', 'terminate'].includes(tr.action)" class="text-[12.5px] text-ink-500">{{ t('After saving you can download their full record as Excel or PDF from this page.') }}</p>
             <p v-if="['resign', 'terminate'].includes(tr.action)" class="text-[12.5px] text-haldi-800">{{ t('Their login is switched off and they are left out of future payrolls. Final settlement is paid with the next payroll.') }}</p>
             <p v-for="(er, k) in tr.errors" :key="k" class="text-sm text-ledger-red">{{ er }}</p>
         </div>

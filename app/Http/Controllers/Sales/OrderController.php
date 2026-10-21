@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Contact;
 use App\Models\ReasonCode;
 use App\Models\SalesOrder;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -42,17 +43,25 @@ class OrderController extends Controller
 
     public function index(Request $request): Response
     {
-        $user = $request->user();
-        $stores = $user->storeIdsFor('sales.orders.view');
-        $q = trim((string) $request->query('q'));
-        $orders = $this->scoped($request, SalesOrder::query())->whereIn('store_id', $stores)->with('customer:id,name,code', 'salesAgent:id,name')
-            ->when($request->query('status'), fn ($w, $s) => $w->where('status', $s))
-            ->when($request->query('channel'), fn ($w, $c) => $w->where('channel', $c))
-            ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('number', 'ilike', "%{$q}%")->orWhereHas('customer', fn ($c) => $c->where('name', 'ilike', "%{$q}%"))))
-            ->latest('id')->paginate($this->perPage($request))->withQueryString();
+        Pager::remember($request, 'sales.orders');
+        $stores = $request->user()->storeIdsFor('sales.orders.view');
+        $orders = $this->listQuery($request)->with('customer:id,name,code', 'salesAgent:id,name')->paginate($this->perPage($request))->withQueryString();
         $counts = $this->scoped($request, SalesOrder::query())->whereIn('store_id', $stores)->whereNotIn('status', ['completed', 'cancelled'])->groupBy('status')->selectRaw('status, COUNT(*) AS n')->pluck('n', 'status');
 
         return Inertia::render('sales/Orders', ['orders' => $orders, 'counts' => $counts, 'filters' => $request->only(['q', 'status', 'channel'])]);
+    }
+
+    /** The orders list as filtered on screen. The next / previous arrows on an order walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        $stores = $request->user()->storeIdsFor('sales.orders.view');
+        $q = trim((string) $request->query('q'));
+
+        return $this->scoped($request, SalesOrder::query())->whereIn('store_id', $stores)
+            ->when($request->query('status'), fn ($w, $s) => $w->where('status', $s))
+            ->when($request->query('channel'), fn ($w, $c) => $w->where('channel', $c))
+            ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('number', 'ilike', "%{$q}%")->orWhereHas('customer', fn ($c) => $c->where('name', 'ilike', "%{$q}%"))))
+            ->latest('id');
     }
 
     public function create(Request $request): Response
@@ -79,6 +88,7 @@ class OrderController extends Controller
 
         return Inertia::render('sales/OrderShow', [
             'order' => $order,
+            'pager' => Pager::for($request, 'sales.orders', $order->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('sales.orders.show', $id)),
             'can' => ['manage' => $user->hasPermission('sales.orders.manage', $order->store_id), 'confirm' => $user->hasPermission('sales.orders.confirm', $order->store_id), 'deliver' => $user->hasPermission('sales.deliveries.manage', $order->store_id)],
             'cancelReasons' => ReasonCode::query()->where('type', 'order_cancel')->where('is_active', true)->get(['id', 'label']),
         ]);

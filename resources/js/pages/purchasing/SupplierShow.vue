@@ -15,7 +15,7 @@ import { uuid } from '@/lib/http';
 import { can } from '@/lib/perms';
 import { localName, t } from '@/lib/i18n';
 
-const props = defineProps<{ supplier: any; orders: any[]; receipts: any[]; bills: any[]; payable: string }>();
+const props = defineProps<{ pager?: any; supplier: any; orders: any[]; receipts: any[]; bills: any[]; payable: string }>();
 const editing = ref(false);
 const paying = ref(false);
 const options = useOptions(['payment_methods']);
@@ -30,7 +30,7 @@ const p = props.supplier.supplier_profile ?? {};
 </script>
 
 <template>
-    <PageHeader :title="supplier.name" :subtitle="`${supplier.code} · ${supplier.phone ?? ''} · ${supplier.city ?? ''}`">
+    <PageHeader :pager="pager" :title="supplier.name" :subtitle="`${supplier.code} · ${supplier.phone ?? ''} · ${supplier.city ?? ''}`">
         <template #actions>
             <Button v-if="can('purchasing.suppliers.manage')" @click="editing = true"><Pencil class="h-4 w-4" />{{ t('Edit') }}</Button>
             <Button v-if="can('purchasing.returns.manage')" :href="route('purchasing.returns.create', { supplier_id: supplier.id })">{{ t('Return goods') }}</Button>

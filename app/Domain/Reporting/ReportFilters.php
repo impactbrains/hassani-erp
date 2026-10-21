@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Support\Settings\Settings;
 use App\Support\Tenancy\CurrentCompany;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -53,14 +54,29 @@ final class ReportFilters
     /** @var array<string, string> */
     public array $options = [];
 
+    /** Time zone of the stores being reported: that store's own zone when exactly one is chosen, else the company's. */
     public string $timezone;
+
+    /** The company's zone, used for any store that has none of its own. */
+    public string $companyTimezone = 'Asia/Karachi';
 
     /** @param array<string, mixed> $input */
     public static function fromInput(array $input, User $user, string $permission, ?string $defaultPreset = null): self
     {
         $filters = new self;
         $company = CurrentCompany::get();
-        $filters->timezone = $company?->timezone ?? 'Asia/Karachi';
+        $allowed = $user->hasPermission('reports.all_stores') ? $user->accessibleStoreIds() : $user->storeIdsFor($permission);
+        if ($allowed === []) {
+            $allowed = $user->accessibleStoreIds();
+        }
+        $requested = array_values(array_filter(array_map('intval', (array) ($input['store_ids'] ?? []))));
+        $filters->storeIds = $requested === [] ? $allowed : array_values(array_intersect($requested, $allowed));
+        if ($filters->storeIds === []) {
+            $filters->storeIds = [0]; // nothing the user may see
+        }
+
+        $filters->companyTimezone = self::safeTimezone($company?->timezone);
+        $filters->timezone = self::resolveTimezone($filters->storeIds, $filters->companyTimezone);
         $today = CarbonImmutable::now($filters->timezone)->startOfDay();
         $filters->preset = in_array($input['preset'] ?? null, self::PRESETS, true) ? $input['preset'] : ($defaultPreset ?? (string) Settings::get('reports.default_period', null, $user->id));
         [$from, $to] = $filters->resolvePeriod($filters->preset, $today, $input['from'] ?? null, $input['to'] ?? null);
@@ -75,16 +91,6 @@ final class ReportFilters
         } elseif ($filters->compare === 'previous_year') {
             $filters->compareFrom = $from->subYear()->toDateString();
             $filters->compareTo = $to->subYear()->toDateString();
-        }
-
-        $allowed = $user->hasPermission('reports.all_stores') ? $user->accessibleStoreIds() : $user->storeIdsFor($permission);
-        if ($allowed === []) {
-            $allowed = $user->accessibleStoreIds();
-        }
-        $requested = array_values(array_filter(array_map('intval', (array) ($input['store_ids'] ?? []))));
-        $filters->storeIds = $requested === [] ? $allowed : array_values(array_intersect($requested, $allowed));
-        if ($filters->storeIds === []) {
-            $filters->storeIds = [0]; // nothing the user may see
         }
 
         foreach (self::ENTITY_FILTERS as $key) {
@@ -110,6 +116,7 @@ final class ReportFilters
     {
         $filters = new self;
         $filters->timezone = 'Asia/Karachi';
+        $filters->companyTimezone = 'Asia/Karachi';
         $filters->preset = 'today';
         $filters->from = $filters->to = CarbonImmutable::now()->toDateString();
         $filters->compare = 'none';
@@ -125,6 +132,36 @@ final class ReportFilters
         }
 
         return $filters;
+    }
+
+    /** A time zone name that is safe to put inside SQL: it must be a real IANA identifier. */
+    public static function safeTimezone(?string $zone, string $default = 'Asia/Karachi'): string
+    {
+        static $valid = null;
+        $valid ??= array_flip(\DateTimeZone::listIdentifiers());
+
+        return $zone !== null && isset($valid[$zone]) ? $zone : $default;
+    }
+
+    /** @param list<int> $storeIds */
+    private static function resolveTimezone(array $storeIds, string $companyTimezone): string
+    {
+        $ids = array_values(array_filter($storeIds));
+        if (count($ids) !== 1) {
+            return $companyTimezone;
+        }
+
+        return self::safeTimezone(DB::table('stores')->where('id', $ids[0])->value('timezone'), $companyTimezone);
+    }
+
+    /**
+     * SQL for "this timestamp as the wall-clock time at its own store". Each row is converted with
+     * its store's time zone, so a report over several stores groups every sale by the hour and day
+     * the customer actually experienced. $column must be a timestamptz column.
+     */
+    public function localTimeSql(string $column, string $storeColumn): string
+    {
+        return "({$column} AT TIME ZONE COALESCE((SELECT s.timezone FROM stores s WHERE s.id = {$storeColumn}), '{$this->companyTimezone}'))";
     }
 
     public function entity(string $key): ?int

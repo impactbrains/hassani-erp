@@ -7,7 +7,7 @@ import Button from '@/components/ui/Button.vue';
 import { date, money } from '@/lib/format';
 import { localName, t } from '@/lib/i18n';
 
-const props = defineProps<{ account: any; opening: string; lines: any[]; closing: string; filters: { from: string; to: string } }>();
+const props = defineProps<{ pager?: any; account: any; opening: string; lines: any[]; closing: string; filters: { from: string; to: string } }>();
 const f = reactive({ ...props.filters });
 function print() {
     window.print();
@@ -18,7 +18,7 @@ function apply() {
 </script>
 
 <template>
-    <PageHeader :title="`${account.code} · ${localName(account)}`" :subtitle="t('Ledger: every entry on this account.')">
+    <PageHeader :pager="pager" :title="`${account.code} · ${localName(account)}`" :subtitle="t('Ledger: every entry on this account.')">
         <template #actions><Button @click="print"><Printer class="h-4 w-4" />{{ t('Print') }}</Button><Button :href="route('accounting.accounts.index')">{{ t('All accounts') }}</Button></template>
     </PageHeader>
     <div class="panel no-print mb-4 flex flex-wrap items-end gap-3 p-3">

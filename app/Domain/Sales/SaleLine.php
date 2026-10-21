@@ -23,6 +23,7 @@ final class SaleLine
         public readonly ?int $approvalId = null,
         public readonly ?int $salesOrderLineId = null,
         public readonly ?string $description = null, // typed name of an unlisted item
+        public readonly ?int $priceRuleId = null, // the price rule that set the list price, if any
     ) {
     }
 

@@ -13,6 +13,7 @@ use App\Models\GoodsReceipt;
 use App\Models\GoodsReceiptLine;
 use App\Models\LandedCost;
 use App\Models\Location;
+use App\Models\PaymentMethod;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderLine;
@@ -33,10 +34,18 @@ use Illuminate\Support\Facades\DB;
  * quarantine (their batch is held too), damaged goods to the damaged area.
  * Accounting: Dr Inventory, Cr Goods-received-not-invoiced; the supplier
  * bill later clears GRNI, so receipts and liabilities never drift apart.
+ *
+ * Purchase stock (settlement "paid_now" or "on_credit") is the same receipt,
+ * billed in the same step through PayablesService and, when paid now, paid
+ * too. It needs the inventory.purchase_stock permission and follows the stock
+ * adjustment approval value: above it, someone who may approve adjustments
+ * must approve before anything is posted.
  */
 final class ReceivingService
 {
-    public function __construct(private readonly StockLedger $ledger, private readonly JournalPoster $journals)
+    public const SETTLEMENTS = ['bill_later', 'paid_now', 'on_credit'];
+
+    public function __construct(private readonly StockLedger $ledger, private readonly JournalPoster $journals, private readonly PayablesService $payables)
     {
     }
 
@@ -44,12 +53,30 @@ final class ReceivingService
      * @param  array{supplier_id: int, purchase_order_id?: int|null, location_id?: int|null, supplier_reference?: string|null, notes?: string|null, is_blind?: bool,
      *     lines: list<array{variant_id: int, variant_unit_id: int, purchase_order_line_id?: int|null, quantity_received: string, quantity_damaged?: string|null,
      *     unit_price: string, batch_no?: string|null, expiry_date?: string|null, quality_status?: string|null, discrepancy_note?: string|null}>,
-     *     landed_costs?: list<array{type: string, amount: string, description?: string|null, allocation_method?: string|null}>}  $data
+     *     landed_costs?: list<array{type: string, amount: string, description?: string|null, allocation_method?: string|null}>,
+     *     settlement?: string|null, payment_method_id?: int|null, amount_paid?: string|null, payment_reference?: string|null}  $data
      */
     public function receive(User $user, Store $store, array $data): GoodsReceipt
     {
-        if (! $user->hasPermission('purchasing.receive', $store->id)) {
-            throw new BusinessRuleException('You are not allowed to receive goods.', 'not_permitted');
+        $settlement = $data['settlement'] ?? null;
+        if ($settlement !== null && ! in_array($settlement, self::SETTLEMENTS, true)) {
+            throw new BusinessRuleException('Choose how this purchase was paid.', 'invalid_settlement', field: 'settlement');
+        }
+        $billsNow = in_array($settlement, ['paid_now', 'on_credit'], true);
+        if ($billsNow && ! $user->hasPermission('inventory.purchase_stock', $store->id)) {
+            throw new BusinessRuleException('You are not allowed to purchase stock. Ask a manager to give you the "Purchase stock" permission.', 'not_permitted');
+        }
+        if (! $billsNow && ! $user->hasPermission('purchasing.receive', $store->id)) {
+            throw new BusinessRuleException($user->hasPermission('inventory.purchase_stock', $store->id)
+                ? 'Choose how this purchase was paid: Paid now or On credit.'
+                : 'You are not allowed to receive goods.', $user->hasPermission('inventory.purchase_stock', $store->id) ? 'settlement_required' : 'not_permitted', field: 'settlement');
+        }
+        $method = null;
+        if ($settlement === 'paid_now') {
+            $method = PaymentMethod::query()->where('is_active', true)->whereIn('type', ['cash', 'bank', 'wallet'])->find($data['payment_method_id'] ?? null);
+            if ($method === null) {
+                throw new BusinessRuleException('Choose what you paid with (cash, bank or wallet).', 'payment_method_required', field: 'payment_method_id');
+            }
         }
         $supplier = Contact::query()->ofType('supplier')->findOrFail($data['supplier_id']);
         $order = isset($data['purchase_order_id']) ? PurchaseOrder::query()->where('store_id', $store->id)->findOrFail($data['purchase_order_id']) : null;
@@ -63,7 +90,7 @@ final class ReceivingService
             ? Location::query()->where('store_id', $store->id)->findOrFail($data['location_id'])
             : $store->defaultReceivingLocation();
 
-        return DB::transaction(function () use ($user, $store, $data, $supplier, $order, $location) {
+        return DB::transaction(function () use ($user, $store, $data, $supplier, $order, $location, $settlement, $method, $billsNow) {
             $receipt = GoodsReceipt::create([
                 'store_id' => $store->id,
                 'number' => Sequences::next('goods_receipt', $store->id, $store->code),
@@ -76,6 +103,9 @@ final class ReceivingService
                 'notes' => $data['notes'] ?? null,
                 'received_by' => $user->id,
                 'received_at' => now(),
+                'settlement' => $settlement,
+                'payment_method_id' => $method?->id,
+                'payment_reference' => $data['payment_reference'] ?? null,
             ]);
 
             $lines = [];
@@ -86,9 +116,114 @@ final class ReceivingService
                 throw new BusinessRuleException('Enter at least one received product.', 'no_lines');
             }
             $landed = $this->allocateLandedCosts($receipt, $lines, $data['landed_costs'] ?? []);
+            $goods = Decimal::money(Decimal::sum(array_map(fn (GoodsReceiptLine $l) => Decimal::mul($l->quantity_received, $l->unit_price), $lines)));
+            foreach ($lines as $line) {
+                $line->save(); // keeps each line's freight share, so a purchase that waits for approval posts the same cost later
+            }
+            if ($settlement === 'paid_now') {
+                $paid = isset($data['amount_paid']) && $data['amount_paid'] !== '' && $data['amount_paid'] !== null ? Decimal::money($data['amount_paid']) : $goods;
+                if (! Decimal::isPositive($paid) || Decimal::gt($paid, $goods)) {
+                    throw new BusinessRuleException('The amount paid must be more than 0 and not more than the goods total (Rs '.$goods.').', 'invalid_amount', field: 'amount_paid');
+                }
+                $receipt->amount_paid = $paid;
+            }
+            $receipt->goods_value = $goods;
+            $receipt->landed_cost_total = $landed;
+            $receipt->save();
 
-            return $this->post($user, $receipt, $lines, $landed);
+            if ($billsNow && $this->needsApproval($user, $store, Decimal::add($goods, $landed))) {
+                $receipt->update(['status' => 'pending_approval']);
+                Audit::record('purchasing.purchase_requested', "Purchase {$receipt->number} from {$supplier->name} for Rs {$goods} is waiting for approval", $receipt);
+
+                return $receipt->fresh('lines');
+            }
+
+            $receipt = $this->post($user, $receipt, $lines, $landed);
+
+            return $billsNow ? $this->settle($user, $receipt) : $receipt;
         });
+    }
+
+    /**
+     * Same rule as stock adjustments: someone who may approve adjustments posts at once; anyone else
+     * posts at once only when the value is at or below the store's approval value (0 means always ask).
+     */
+    private function needsApproval(User $user, Store $store, string $value): bool
+    {
+        if ($user->hasPermission('inventory.adjust.approve', $store->id)) {
+            return false;
+        }
+        $threshold = (string) Settings::get('inventory.adjustment_approval_value', $store->id);
+
+        return ! (Decimal::isPositive($threshold) && Decimal::lte($value, $threshold));
+    }
+
+    /** Approves a purchase that was waiting, then adds the stock and records the bill and payment. */
+    public function approve(User $user, GoodsReceipt $receipt): GoodsReceipt
+    {
+        return DB::transaction(function () use ($user, $receipt) {
+            $receipt = GoodsReceipt::query()->lockForUpdate()->findOrFail($receipt->id);
+            if ($receipt->status !== 'pending_approval') {
+                throw new BusinessRuleException('This purchase is not waiting for approval.', 'not_pending');
+            }
+            if (! $user->hasPermission('inventory.adjust.approve', $receipt->store_id)) {
+                throw new BusinessRuleException('You are not allowed to approve purchases.', 'not_permitted');
+            }
+            if ($user->id === $receipt->received_by && ! $user->isOwner()) {
+                throw new BusinessRuleException('Someone other than the person who entered this purchase must approve it.', 'self_approval');
+            }
+            $receipt->update(['approved_by' => $user->id]);
+            Audit::record('purchasing.purchase_approved', "Approved purchase {$receipt->number}", $receipt);
+            $posted = $this->post($user, $receipt, $receipt->lines()->orderBy('id')->get()->all(), (string) $receipt->landed_cost_total);
+
+            return $this->settle($user, $posted);
+        });
+    }
+
+    public function reject(User $user, GoodsReceipt $receipt, string $reason): GoodsReceipt
+    {
+        if ($receipt->status !== 'pending_approval' || ! $user->hasPermission('inventory.adjust.approve', $receipt->store_id)) {
+            throw new BusinessRuleException('You cannot reject this purchase.', 'not_permitted');
+        }
+        $receipt->update(['status' => 'rejected', 'decision_note' => $reason, 'approved_by' => $user->id]);
+        Audit::record('purchasing.purchase_rejected', "Rejected purchase {$receipt->number}: {$reason}", $receipt);
+
+        return $receipt;
+    }
+
+    /**
+     * Bills the received goods to the supplier (Dr GRNI, Cr Accounts payable) and, when paid now,
+     * pays that bill (Dr Accounts payable, Cr cash/bank/wallet). Freight and other extra costs are not
+     * on the supplier's bill.
+     */
+    private function settle(User $user, GoodsReceipt $receipt): GoodsReceipt
+    {
+        $receipt->loadMissing('lines', 'supplier.supplierProfile', 'store');
+        $store = $receipt->store;
+        $date = $store->businessDate();
+        $days = $receipt->settlement === 'on_credit' ? (int) ($receipt->supplier->supplierProfile?->payment_terms_days ?? 0) : 0;
+        $bill = $this->payables->recordBill($user, $store, [
+            'supplier_id' => $receipt->supplier_id,
+            'supplier_invoice_no' => $receipt->supplier_reference,
+            'bill_date' => $date,
+            'due_date' => \Carbon\CarbonImmutable::parse($date)->addDays($days)->toDateString(),
+            'notes' => "Purchase stock {$receipt->number}",
+            'lines' => $receipt->lines->map(fn (GoodsReceiptLine $l) => ['goods_receipt_line_id' => $l->id, 'quantity' => $l->quantity_received, 'unit_price' => $l->unit_price])->all(),
+        ]);
+        $payment = null;
+        if ($receipt->settlement === 'paid_now') {
+            $payment = $this->payables->recordPayment($user, $store, [
+                'supplier_id' => $receipt->supplier_id,
+                'payment_method_id' => $receipt->payment_method_id,
+                'amount' => $receipt->amount_paid ?? $bill->total,
+                'reference' => $receipt->payment_reference,
+                'bill_ids' => [$bill->id],
+                'notes' => "Paid on purchase {$receipt->number}",
+            ]);
+        }
+        $receipt->update(['supplier_bill_id' => $bill->id, 'payment_id' => $payment?->id]);
+
+        return $receipt->fresh('lines');
     }
 
     /** @param array<string, mixed> $row */
@@ -121,10 +256,7 @@ final class ReceivingService
                 ['variant_id' => $variant->id, 'batch_no' => $batchNo],
                 ['expiry_date' => $row['expiry_date'] ?? null, 'supplier_id' => $receipt->supplier_id, 'status' => 'available'],
             );
-            if (($row['quality_status'] ?? 'accepted') === 'quarantined') {
-                $batch->update(['status' => 'quarantined', 'status_reason' => 'QC hold on '.$receipt->number]);
-            }
-            $batchId = $batch->id;
+            $batchId = $batch->id; // a QC hold is put on the batch when the receipt is posted
         }
 
         return GoodsReceiptLine::create([
@@ -192,6 +324,9 @@ final class ReceivingService
             $line->save();
             $goodsValue = Decimal::add($goodsValue, $lineValue);
 
+            if ($line->quality_status === 'quarantined' && $line->batch_id) {
+                StockBatch::query()->whereKey($line->batch_id)->update(['status' => 'quarantined', 'status_reason' => 'QC hold on '.$receipt->number]);
+            }
             $acceptedLocation = $line->quality_status === 'quarantined' ? $quarantine : $receipt->location;
             if (Decimal::isPositive($line->base_quantity_accepted)) {
                 $changes[] = new StockChange($store->id, $acceptedLocation->id, $line->variant_id, $line->base_quantity_accepted, MovementTypes::RECEIPT, $line->batch_id, $line->base_unit_cost, sourceLineId: $line->id);
@@ -216,6 +351,12 @@ final class ReceivingService
         $receipt->update(['status' => 'posted', 'goods_value' => Decimal::money($goodsValue), 'landed_cost_total' => $landedTotal, 'posted_by' => $user->id, 'business_date' => $date]);
         if ($receipt->purchase_order_id) {
             $this->refreshOrderStatus($receipt->purchaseOrder);
+        }
+        // The product's Purchase price follows what was just paid (per base unit, before freight).
+        foreach ($lines as $line) {
+            if (Decimal::isPositive($line->unit_price)) {
+                ProductVariant::query()->whereKey($line->variant_id)->update(['purchase_price' => Decimal::round(Decimal::div($line->unit_price, $line->unit_factor, 6), 4)]);
+            }
         }
         // Remember which supplier sells which product in which pack, for reorder suggestions and purchase orders.
         foreach ($receipt->lines()->get(['variant_id', 'variant_unit_id']) as $line) {

@@ -11,13 +11,23 @@ import { attendanceStatus, clock, minutes } from '@/lib/hr';
 import { t } from '@/lib/i18n';
 
 /** Today's board: who is in, late or absent; clock people in and out; review correction requests. */
-const props = defineProps<{ date: string; employees: any[]; records: Record<string, any>; roster: Record<string, any[]>; corrections: any[]; can: { manage: boolean; approve: boolean } }>();
+const props = defineProps<{ date: string; employees: any[]; records: Record<string, any>; roster: Record<string, any[]>; breaks: Record<string, any[]>; breakAllowed: number; corrections: any[]; can: { manage: boolean; approve: boolean } }>();
 const day = ref(props.date);
 function go() {
     router.get(route('hr.attendance'), { date: day.value }, { preserveScroll: true });
 }
 function punch(id: number, direction: 'in' | 'out') {
     router.post(route('hr.attendance.punch'), { contact_id: id, direction }, { preserveScroll: true });
+}
+const openBreak = (id: number) => (props.breaks[id] ?? []).find((b: any) => !b.ended_at);
+function startBreak(id: number, ev: Event) {
+    const el = ev.target as HTMLSelectElement;
+    if (!el.value) return;
+    router.post(route('hr.breaks.start'), { contact_id: id, type: el.value }, { preserveScroll: true });
+    el.value = '';
+}
+function endBreak(b: any) {
+    router.post(route('hr.breaks.end', b.id), {}, { preserveScroll: true });
 }
 const fixing = ref<any>(null);
 const fix = useForm({ contact_id: null as number | null, date: props.date, clock_in: '', clock_out: '', reason: '' });
@@ -42,6 +52,7 @@ const tone = (s: string) => (s === 'absent' ? 'bad' : s === 'late' ? 'warn' : ['
     <PageHeader :title="t('Attendance')" :subtitle="date(props.date)">
         <template #actions>
             <input v-model="day" type="date" class="input w-44" @change="go" />
+            <Button :href="route('hr.breaks')">{{ t('Breaks') }}</Button>
             <Button :href="route('hr.roster')">{{ t('Roster') }}</Button>
         </template>
     </PageHeader>
@@ -57,23 +68,32 @@ const tone = (s: string) => (s === 'absent' ? 'bad' : s === 'late' ? 'warn' : ['
     </section>
     <section class="panel">
         <table class="table-base">
-            <thead><tr><th>{{ t('Employee') }}</th><th>{{ t('Shift') }}</th><th>{{ t('In') }}</th><th>{{ t('Out') }}</th><th>{{ t('Status') }}</th><th class="num">{{ t('Late') }}</th><th class="num">{{ t('Worked') }}</th><th></th></tr></thead>
+            <thead><tr><th>{{ t('Employee') }}</th><th>{{ t('Shift') }}</th><th>{{ t('In') }}</th><th>{{ t('Out') }}</th><th>{{ t('Status') }}</th><th class="num">{{ t('Late') }}</th><th class="num">{{ t('Break') }}</th><th class="num">{{ t('Worked') }}</th><th></th></tr></thead>
             <tbody>
                 <tr v-for="e in employees" :key="e.id">
                     <td class="font-medium">{{ e.name }}</td>
                     <td class="text-[12.5px]">{{ (roster[e.id] ?? []).map((r: any) => `${r.work_shift?.name} ${String(r.work_shift?.start_time).slice(0, 5)}–${String(r.work_shift?.end_time).slice(0, 5)}`).join(', ') || '—' }}</td>
                     <td>{{ clock(records[e.id]?.clock_in_at) }}</td><td>{{ clock(records[e.id]?.clock_out_at) }}</td>
                     <td><Badge v-if="records[e.id]" :tone="tone(records[e.id].status)" :label="t(attendanceStatus[records[e.id].status] ?? records[e.id].status)" /><span v-else class="text-ink-400">—</span></td>
-                    <td class="num">{{ minutes(records[e.id]?.late_minutes) }}</td><td class="num">{{ minutes(records[e.id]?.worked_minutes) }}</td>
+                    <td class="num">{{ minutes(records[e.id]?.late_minutes) }}</td><td class="num">
+                        {{ minutes(records[e.id]?.break_minutes) }}
+                        <Badge v-if="records[e.id]?.break_over_minutes > 0" tone="warn" :label="`+${records[e.id].break_over_minutes}m ${t('over')}`" :title="`${t('Allowed')}: ${breakAllowed}m`" />
+                        <span v-if="openBreak(e.id)" class="ms-1 text-[12px] text-haldi-800">{{ t('on break') }}</span>
+                    </td>
+                    <td class="num">{{ minutes(records[e.id]?.worked_minutes) }}</td>
                     <td class="whitespace-nowrap text-end">
                         <template v-if="can.manage && props.date === new Date().toISOString().slice(0, 10)">
                             <Button v-if="!records[e.id]?.clock_in_at" size="sm" variant="primary" @click="punch(e.id, 'in')">{{ t('Clock in') }}</Button>
-                            <Button v-else-if="!records[e.id]?.clock_out_at" size="sm" @click="punch(e.id, 'out')">{{ t('Clock out') }}</Button>
+                            <template v-else-if="!records[e.id]?.clock_out_at">
+                                <Button v-if="openBreak(e.id)" size="sm" variant="primary" @click="endBreak(openBreak(e.id))">{{ t('End break') }}</Button>
+                                <select v-else class="input inline-block w-28 py-1 text-[13px]" :aria-label="t('Start break')" @change="startBreak(e.id, $event)"><option value="">{{ t('Start break…') }}</option><option value="meal">{{ t('Meal') }}</option><option value="prayer">{{ t('Prayer') }}</option><option value="other">{{ t('Other') }}</option></select>
+                                <Button size="sm" @click="punch(e.id, 'out')">{{ t('Clock out') }}</Button>
+                            </template>
                         </template>
                         <Button v-if="can.manage" size="sm" variant="ghost" @click="openFix(e)">{{ t('Correct') }}</Button>
                     </td>
                 </tr>
-                <tr v-if="!employees.length"><td colspan="8" class="py-8 text-center text-ink-500">{{ t('No employees in this store.') }}</td></tr>
+                <tr v-if="!employees.length"><td colspan="9" class="py-8 text-center text-ink-500">{{ t('No employees in this store.') }}</td></tr>
             </tbody>
         </table>
     </section>

@@ -1,4 +1,12 @@
 import { ur2 } from './ur2';
+import { ur3 } from './ur3';
+import { ur4 } from './ur4';
+import { ur5 } from './ur5';
+import { ur9 } from './ur9';
+import { ur10 } from './ur10';
+import { ur6 } from './ur6';
+import { ur7 } from './ur7';
+import { ur8 } from './ur8';
 
 /** Hand-written Urdu for the interface. Keys are the English text. */
 const base: Record<string, string> = {
@@ -255,4 +263,4 @@ const base: Record<string, string> = {
 };
 
 /** Hand-written entries win over the second dictionary when both have a key. */
-export const ur: Record<string, string> = { ...ur2, ...base };
+export const ur: Record<string, string> = { ...ur2, ...ur3, ...ur4, ...ur5, ...ur6, ...ur7, ...ur8, ...ur9, ...ur10, ...base };

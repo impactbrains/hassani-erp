@@ -269,7 +269,7 @@ final class PayrollService
                 $payslip->update(['status' => 'paid', 'payment_method_id' => $method->id, 'payment_reference' => $reference, 'paid_at' => now()]);
                 $total = Decimal::add($total, $payslip->net_pay);
             }
-            $date = now()->setTimezone('Asia/Karachi')->toDateString();
+            $date = now()->setTimezone(\App\Support\Tenancy\CurrentCompany::get()?->timezone ?? 'Asia/Karachi')->toDateString();
             $this->journals->post('pay_'.substr(md5(implode(',', $payslips->pluck('id')->all())), 0, 20), $run, $date, "Salaries paid for {$run->number} by {$method->name}", [
                 ['account' => 'salaries_payable', 'debit' => $total],
                 ['account' => $method->account_id, 'credit' => $total],

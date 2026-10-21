@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { money, qty } from '@/lib/format';
+import { code39 } from '@/lib/code39';
 
 /**
  * Thermal receipt (80 mm or 58 mm) in English only, Urdu only, or both.
@@ -13,6 +14,8 @@ const props = defineProps<{ receipt: any; language?: 'en' | 'ur' | 'both' }>();
 const r = computed(() => props.receipt);
 const lang = computed<'en' | 'ur' | 'both'>(() => props.language ?? r.value.language ?? 'en');
 const urduOnly = computed(() => lang.value === 'ur');
+// The number as a barcode, so a printed receipt can be scanned at the POS (reprint or return). Not for credit notes.
+const numberBarcode = computed(() => (r.value.kind === 'credit_note' || !r.value.number ? null : code39(String(r.value.number))));
 
 const LABELS: Record<string, [string, string]> = {
     receipt: ['RECEIPT', 'رسید'],
@@ -109,6 +112,12 @@ const nonZero = (v: any) => v !== null && v !== undefined && Number(v) !== 0;
         <div v-if="lang !== 'en' && r.footer_ur" class="urdu text-center text-[13px]" dir="rtl">{{ r.footer_ur }}</div>
         <div v-if="lang !== 'ur' && r.footer" class="text-center text-[11px]">{{ r.footer }}</div>
         <div class="mt-1 text-center text-[10px]" :class="lang === 'ur' ? 'urdu text-[11px]' : ''">{{ lang === 'ur' ? LABELS.note[1] : LABELS.note[0] }}</div>
+        <div v-if="numberBarcode" class="mt-2 text-center">
+            <svg :viewBox="`0 0 ${numberBarcode.width} 30`" preserveAspectRatio="none" class="mx-auto block h-9 w-full" role="img" :aria-label="String(r.number)">
+                <rect v-for="(b, i) in numberBarcode.bars" :key="i" :x="b.x" y="0" :width="b.w" height="30" fill="#000" />
+            </svg>
+            <div class="text-[10px] tabular-nums" dir="ltr">{{ r.number }}</div>
+        </div>
     </div>
 </template>
 

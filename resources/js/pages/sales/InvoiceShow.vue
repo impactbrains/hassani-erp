@@ -18,7 +18,7 @@ import { localName, t } from '@/lib/i18n';
  * quantities, why, what happens to the goods, and whether the customer gets
  * cash back or a Khata credit. Big refunds need a manager PIN.
  */
-const props = defineProps<{ invoice: any; receipt: any; showCost: boolean; canReturn: boolean; returnReasons: any[]; openShift: number | null }>();
+const props = defineProps<{ pager?: any; invoice: any; receipt: any; showCost: boolean; canReturn: boolean; returnReasons: any[]; openShift: number | null }>();
 const options = useOptions(['payment_methods']);
 
 const returning = ref(false);
@@ -84,7 +84,7 @@ async function submit(token: string | null = null) {
 </script>
 
 <template>
-    <PageHeader :title="invoice.number" :subtitle="`${dateTime(invoice.posted_at)} · ${invoice.cashier?.name ?? ''} · ${invoice.store?.name ?? ''}`">
+    <PageHeader :pager="pager" :title="invoice.number" :subtitle="`${dateTime(invoice.posted_at)} · ${invoice.cashier?.name ?? ''} · ${invoice.store?.name ?? ''}`">
         <template #actions>
             <Badge :status="invoice.payment_status" />
             <Button @click="printElement(reprintEl)"><Printer class="h-4 w-4" />{{ t('Reprint') }}</Button>

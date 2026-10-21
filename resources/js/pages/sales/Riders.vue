@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { router, useForm } from '@inertiajs/vue3';
+import { Plus } from 'lucide-vue-next';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
 import Badge from '@/components/ui/Badge.vue';
@@ -49,7 +50,9 @@ function saveHandover() {
 </script>
 
 <template>
-    <PageHeader :title="t('Riders')" :subtitle="t('Assign deliveries, record what happened, and receive the cash riders collected.')" />
+    <PageHeader :title="t('Riders')" :subtitle="t('Assign deliveries, record what happened, and receive the cash riders collected.')">
+        <template #actions><Button v-if="can('hr.employees.manage')" variant="primary" :href="route('hr.employees.create', { role_type: 'rider' })"><Plus class="h-4 w-4" />{{ t('Add rider') }}</Button></template>
+    </PageHeader>
     <section class="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div v-for="r in riders" :key="r.id" class="panel flex items-center gap-3 p-3">
             <div class="flex-1">

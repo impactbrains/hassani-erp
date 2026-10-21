@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Inventory;
 use App\Domain\Inventory\AdjustmentService;
 use App\Http\Controllers\Controller;
 use App\Models\StockAdjustment;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -15,15 +16,23 @@ class AdjustmentController extends Controller
 {
     public function index(Request $request): Response
     {
+        Pager::remember($request, 'inventory.adjustments');
+
+        return Inertia::render('inventory/Adjustments', [
+            'adjustments' => $this->listQuery($request)->with('store:id,name', 'reasonCode:id,label', 'requester:id,name', 'approver:id,name')->paginate($this->perPage($request))->withQueryString(),
+            'filters' => $request->only(['status', 'kind']),
+        ]);
+    }
+
+    /** The adjustments list as filtered on screen. The next / previous arrows on an adjustment walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
         $stores = $request->user()->storeIdsFor('inventory.adjust');
         $stores = array_values(array_unique([...$stores, ...$request->user()->storeIdsFor('inventory.adjust.approve')]));
 
-        return Inertia::render('inventory/Adjustments', [
-            'adjustments' => StockAdjustment::query()->whereIn('store_id', $stores)->with('store:id,name', 'reasonCode:id,label', 'requester:id,name', 'approver:id,name')
-                ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))->when($request->query('kind'), fn ($q, $k) => $q->where('kind', $k))
-                ->latest('id')->paginate($this->perPage($request))->withQueryString(),
-            'filters' => $request->only(['status', 'kind']),
-        ]);
+        return StockAdjustment::query()->whereIn('store_id', $stores)
+            ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))->when($request->query('kind'), fn ($q, $k) => $q->where('kind', $k))
+            ->latest('id');
     }
 
     public function create(Request $request): Response
@@ -61,6 +70,7 @@ class AdjustmentController extends Controller
         $user = $request->user();
 
         return Inertia::render('inventory/AdjustmentShow', [
+            'pager' => Pager::for($request, 'inventory.adjustments', $adjustment->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('inventory.adjustments.show', $id)),
             'adjustment' => $adjustment->load('lines.variant:id,product_id,sku,name', 'lines.variant.product:id,name', 'lines.location:id,name', 'reasonCode:id,label', 'requester:id,name', 'approver:id,name', 'secondApprover:id,name', 'store:id,name'),
             'canApprove' => $user->hasPermission('inventory.adjust.approve', $adjustment->store_id) && $adjustment->status === 'pending_approval' && $adjustment->requested_by !== $user->id,
             'showCost' => $user->hasPermission('catalog.costs.view'),

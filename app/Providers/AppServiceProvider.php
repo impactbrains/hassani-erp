@@ -15,6 +15,13 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        // The app writes times in its own zone (UTC) without an offset, so the database session must read them
+        // in the same zone. Left alone, PostgreSQL uses the Windows zone (Karachi) and every stored time lands
+        // five hours early.
+        $connection = config('database.default');
+        if (config("database.connections.{$connection}.driver") === 'pgsql') {
+            config(["database.connections.{$connection}.timezone" => config('app.timezone', 'UTC')]);
+        }
     }
 
     public function boot(): void

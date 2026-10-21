@@ -191,7 +191,7 @@ it('blocks selling a product that has no price', function () {
     expect(fn () => DB::transaction(fn () => ($this->checkout)([
         'lines' => [['variant_id' => $noPrice->id, 'variant_unit_id' => $noPrice->units->first()->id, 'quantity' => '1']],
         'payments' => [['payment_method_id' => $this->cash->id, 'amount' => '10']],
-    ])))->toThrow(BusinessRuleException::class, 'has no price');
+    ])))->toThrow(BusinessRuleException::class, 'has no In-store price');
 });
 
 it('requires an open shift owned by the cashier', function () {

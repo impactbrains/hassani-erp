@@ -11,7 +11,7 @@ import { date, money, qty } from '@/lib/format';
 import { uuid } from '@/lib/http';
 import { localName, t } from '@/lib/i18n';
 
-const props = defineProps<{ bill: any; openShift: number | null }>();
+const props = defineProps<{ pager?: any; bill: any; openShift: number | null }>();
 const options = useOptions(['payment_methods']);
 const methods = computed(() => (options.payment_methods ?? []).filter((m: any) => ['cash', 'bank', 'wallet'].includes(m.type)));
 const due = computed(() => Number(props.bill.total) - Number(props.bill.amount_paid) - Number(props.bill.amount_credited));
@@ -24,7 +24,7 @@ function submit() {
 </script>
 
 <template>
-    <PageHeader :title="`${t('Bill')} ${bill.number}`" :subtitle="`${bill.supplier?.name} · ${bill.supplier_invoice_no ?? ''} · ${date(bill.bill_date)}`">
+    <PageHeader :pager="pager" :title="`${t('Bill')} ${bill.number}`" :subtitle="`${bill.supplier?.name} · ${bill.supplier_invoice_no ?? ''} · ${date(bill.bill_date)}`">
         <template #actions>
             <Badge :status="bill.payment_status" />
             <Button :href="route('purchasing.suppliers.show', bill.supplier_id)">{{ t('Supplier') }}</Button>

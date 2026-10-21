@@ -6,7 +6,8 @@ import { money, qty } from '@/lib/format';
 import { t } from '@/lib/i18n';
 
 /** Search products by name (English or Urdu), SKU or barcode; Enter adds the first match. */
-const props = withDefaults(defineProps<{ customerId?: number | null; storeId?: number | null; placeholder?: string; showStock?: boolean; purpose?: 'sale' | 'purchase' | 'any' }>(), { customerId: null, storeId: null, placeholder: undefined, showStock: true, purpose: 'sale' });
+/** On buying screens (purpose "purchase"), pass the supplier so each result shows what you last paid that supplier. */
+const props = withDefaults(defineProps<{ customerId?: number | null; storeId?: number | null; supplierId?: number | null; placeholder?: string; showStock?: boolean; purpose?: 'sale' | 'purchase' | 'any' }>(), { customerId: null, storeId: null, supplierId: null, placeholder: undefined, showStock: true, purpose: 'sale' });
 const emit = defineEmits<{ pick: [product: any] }>();
 
 const q = ref('');
@@ -23,7 +24,7 @@ watch(q, (value) => {
 onBeforeUnmount(() => clearTimeout(timer));
 
 async function load() {
-    results.value = await get(route('lookup.products', { q: q.value, customer_id: props.customerId, store_id: props.storeId, purpose: props.purpose, limit: 15 }));
+    results.value = await get(route('lookup.products', { q: q.value, customer_id: props.customerId, store_id: props.storeId, supplier_id: props.supplierId, purpose: props.purpose, limit: 15 }));
     active.value = 0;
     open.value = true;
 }
@@ -55,7 +56,8 @@ function closeSoon() {
             <li v-for="(p, i) in results" :key="p.variant_id">
                 <button type="button" class="flex w-full items-center gap-3 px-3 py-2 text-start text-sm" :class="i === active ? 'bg-haldi-50' : 'hover:bg-ink-50'" @mousedown.prevent="pick(p)">
                     <span class="min-w-0 flex-1"><span class="font-medium">{{ p.name }}</span> <span class="text-[12px] text-ink-400">{{ p.sku }}</span><span v-if="p.name_ur" class="urdu block text-[12.5px] text-ink-500" dir="rtl">{{ p.name_ur }}</span></span>
-                    <span class="text-end text-[12.5px] tabular-nums text-ink-600">{{ money(p.units.find((u: any) => u.is_default)?.price ?? p.units[0]?.price) }}<span v-if="showStock" class="block" :class="Number(p.available) > 0 ? 'text-ink-400' : 'text-ledger-red'">{{ qty(p.available) }} {{ t('in stock') }}</span></span>
+                    <span v-if="purpose === 'purchase' && p.last_cost" class="text-end text-[12.5px] tabular-nums text-ink-600">{{ t('Last paid') }} {{ money(p.last_cost.pack_price) }}/{{ p.last_cost.unit }}<span v-if="showStock" class="block" :class="Number(p.available) > 0 ? 'text-ink-400' : 'text-ledger-red'">{{ qty(p.available) }} {{ t('in stock') }}</span></span>
+                    <span v-else class="text-end text-[12.5px] tabular-nums text-ink-600">{{ money(p.units.find((u: any) => u.is_default)?.price ?? p.units[0]?.price) }}<span v-if="showStock" class="block" :class="Number(p.available) > 0 ? 'text-ink-400' : 'text-ledger-red'">{{ qty(p.available) }} {{ t('in stock') }}</span></span>
                 </button>
             </li>
         </ul>

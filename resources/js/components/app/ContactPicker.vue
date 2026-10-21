@@ -8,7 +8,7 @@ import { localName, t } from '@/lib/i18n';
 
 /**
  * Search customers, suppliers or employees by name, code or phone.
- * Pass `create-route` (a route name that returns JSON) to also offer "+ Add a customer".
+ * Pass `create-route` (a route name that returns JSON) to also offer "+ Add a customer" (or "+ Add a supplier").
  */
 const props = withDefaults(defineProps<{ type: 'customer' | 'supplier' | 'employee'; modelValue: any | null; placeholder?: string; dark?: boolean; roleType?: string; createRoute?: string }>(), { placeholder: undefined, dark: false, roleType: undefined, createRoute: undefined });
 const emit = defineEmits<{ 'update:modelValue': [any | null]; dialog: [boolean] }>();
@@ -23,6 +23,10 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 
 // The "+ Add a customer" row shows once something has been typed.
 const showAdd = computed(() => !!props.createRoute && !!q.value.trim());
+const isSupplier = computed(() => props.type === 'supplier');
+const words = computed(() => isSupplier.value
+    ? { add: 'Add a supplier', maybe: 'This supplier may already exist:', use: 'Use this supplier', anyway: 'Add as a new supplier anyway' }
+    : { add: 'Add a customer', maybe: 'This customer may already exist:', use: 'Use this customer', anyway: 'Add as a new customer anyway' });
 
 async function lookup(term: string): Promise<any[]> {
     return get(route('lookup.contacts', { type: props.type, q: term, role_type: props.roleType }));
@@ -94,7 +98,7 @@ async function save(confirmNotDuplicate: boolean) {
         saving.value = false;
     }
 }
-/** Select a customer. The row comes from the same search the picker uses, so credit info matches. */
+/** Select the new contact. The row comes from the same search the picker uses, so credit info matches. */
 async function pick(contact: any) {
     saving.value = true;
     let chosen = contact;
@@ -126,7 +130,7 @@ defineExpose({ focus: () => input.value?.focus() });
             <Search class="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 opacity-50" />
             <input ref="input" v-model="q" type="search" class="input ps-9" :class="dark ? '!border-white/15 !bg-white/5 !text-white placeholder:!text-ink-300' : ''" :placeholder="placeholder ?? t('Search by name, code or phone')" @keydown="onKey" @focus="open = results.length > 0 || showAdd" @blur="closeSoon" />
         </div>
-        <ul v-if="open && (results.length || showAdd)" class="absolute z-30 mt-1 max-h-72 w-full overflow-auto rounded-lg border border-ink-100 bg-white py-1 text-graphite shadow-pop">
+        <ul v-if="open && (results.length || showAdd)" class="absolute z-30 mt-1 max-h-72 w-full min-w-[16rem] overflow-auto rounded-lg border border-ink-100 bg-white py-1 text-graphite shadow-pop">
             <li v-for="(r, i) in results" :key="r.id">
                 <button type="button" class="flex w-full items-center gap-3 px-3 py-2 text-start text-sm" :class="i === active ? 'bg-haldi-50' : 'hover:bg-ink-50'" @mousedown.prevent="choose(r)">
                     <span class="min-w-0 flex-1"><span class="font-medium">{{ localName(r) }}</span> <span class="text-[12px] text-ink-400">{{ r.code }}</span><span v-if="r.area" class="block text-[12px] text-ink-500">{{ r.area }}</span></span>
@@ -135,12 +139,12 @@ defineExpose({ focus: () => input.value?.focus() });
             </li>
             <li v-if="showAdd" :class="results.length ? 'border-t border-ink-100' : ''">
                 <button type="button" class="flex w-full items-center gap-2 px-3 py-2 text-start text-sm font-medium text-haldi-700" :class="active === results.length ? 'bg-haldi-50' : 'hover:bg-ink-50'" @mousedown.prevent="startCreate">
-                    <Plus class="h-4 w-4 shrink-0" />{{ t('Add a customer') }} <span class="truncate font-normal text-ink-500">“{{ q.trim() }}”</span>
+                    <Plus class="h-4 w-4 shrink-0" /><span class="shrink-0 whitespace-nowrap">{{ t(words.add) }}</span> <span class="min-w-0 truncate font-normal text-ink-500">“{{ q.trim() }}”</span>
                 </button>
             </li>
         </ul>
 
-        <Modal :open="dialogOpen" :title="t('Add a customer')" size="md" @close="dialogOpen = false">
+        <Modal :open="dialogOpen" :title="t(words.add)" size="md" @close="dialogOpen = false">
             <form class="space-y-3" @submit.prevent="save(false)">
                 <template v-if="!matches.length">
                     <label class="block"><span class="field-label">{{ t('Name') }} *</span><input v-model="form.name" class="input" maxlength="200" autofocus required /></label>
@@ -155,19 +159,19 @@ defineExpose({ focus: () => input.value?.focus() });
                     </div>
                 </template>
                 <template v-else>
-                    <p class="text-sm text-ink-700">{{ t('This customer may already exist:') }}</p>
+                    <p class="text-sm text-ink-700">{{ t(words.maybe) }}</p>
                     <ul class="divide-y divide-ink-100 rounded border border-ink-100">
                         <li v-for="m in matches" :key="m.id" class="flex items-center gap-3 px-3 py-2">
                             <div class="min-w-0 flex-1">
                                 <div class="truncate font-medium">{{ m.name }} <span class="text-[12px] text-ink-400">{{ m.code }}</span></div>
                                 <div class="truncate text-[12.5px] text-ink-500">{{ [m.phone, m.area].filter(Boolean).join(', ') }}</div>
                             </div>
-                            <Button type="button" size="sm" variant="primary" :loading="saving" @click="pick(m)">{{ t('Use this customer') }}</Button>
+                            <Button type="button" size="sm" variant="primary" :loading="saving" @click="pick(m)">{{ t(words.use) }}</Button>
                         </li>
                     </ul>
                     <div class="flex justify-end gap-2">
                         <Button type="button" @click="matches = []">{{ t('Back') }}</Button>
-                        <Button type="button" :loading="saving" @click="save(true)">{{ t('Add as a new customer anyway') }}</Button>
+                        <Button type="button" :loading="saving" @click="save(true)">{{ t(words.anyway) }}</Button>
                     </div>
                 </template>
             </form>

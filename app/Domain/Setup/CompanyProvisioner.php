@@ -153,7 +153,7 @@ final class CompanyProvisioner
         ]);
         TaxCategory::create(['code' => 'EXEMPT', 'name' => 'Exempt']);
 
-        PriceBook::create(['code' => 'RETAIL', 'name' => 'Retail', 'name_ur' => 'پرچون', 'kind' => 'retail', 'is_default' => true]);
+        PriceBook::create(['code' => 'RETAIL', 'name' => 'In-store', 'name_ur' => 'دکان کی قیمت', 'kind' => 'retail', 'is_default' => true]);
         PriceBook::create(['code' => 'WHOLESALE', 'name' => 'Wholesale', 'name_ur' => 'ہول سیل', 'kind' => 'wholesale']);
     }
 

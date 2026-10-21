@@ -32,9 +32,10 @@ use Illuminate\Support\Facades\DB;
 
 /**
  * POS checkout. The browser cart is only a proposal: this service re-prices
- * every line from the price book, checks discounts, overrides, MRP, margin
- * floor and Khata limits against the cashier's permissions and manager
- * approvals, then posts the sale through SaleRecorder.
+ * every line from the price list and the price rules (PriceRules), checks
+ * discounts, overrides, MRP, margin floor and Khata limits against the
+ * cashier's permissions and manager approvals, then posts the sale through
+ * SaleRecorder. A rule price is a list price: it needs no approval.
  *
  * Retrying the same checkout (same idempotency key) returns the receipt
  * that was already posted instead of selling twice.
@@ -49,6 +50,8 @@ final class CheckoutService
         private readonly CreditControl $credit,
         private readonly SaleRecorder $recorder,
         private readonly \App\Domain\Catalog\UnlistedItems $unlisted,
+        private readonly StockShortages $shortages,
+        private readonly \App\Domain\Catalog\PriceRules $rules,
     ) {}
 
     /** @param array<string, mixed> $input validated CheckoutRequest data */
@@ -81,7 +84,7 @@ final class CheckoutService
         $register = $this->register($user, (int) $input['register_id']);
         $customer = $this->customer($input['customer_id'] ?? null);
         $date = $register->store->businessDate();
-        [$lines] = $this->buildLines($user, $register, $customer, $input['lines'], $date, dryRun: true);
+        [$lines, , $ruled] = $this->buildLines($user, $register, $customer, $input['lines'], $date, dryRun: true);
         $pricing = $this->pricer->price(
             array_map(fn(SaleLine $line, int $i) => $line->forPricer($i), $lines, array_keys($lines)),
             $this->cartDiscount($input),
@@ -91,7 +94,12 @@ final class CheckoutService
         return $pricing + [
             'unit_prices' => array_map(fn(SaleLine $l) => $l->unitPrice, $lines),
             'list_prices' => array_map(fn(SaleLine $l) => $l->listPrice, $lines),
+            // Per line: the rule that set the price ("Wholesale price · 6+"), and "add 2 more for ..." when close to one.
+            'price_tags' => array_map(fn($r) => $r['tag'] ?? null, $ruled),
+            'price_hints' => array_map(fn($r) => $r['hint'] ?? null, $ruled),
             'discount_needs_approval' => $this->discountNeedsApproval($user, $register->store_id, $pricing['max_discount_percent']),
+            // Every item that cannot be sold from the stock on hand, so the Pay dialog can list them all.
+            'shortages' => $this->shortages->forLines($register->store_id, $lines, $date),
         ];
     }
 
@@ -122,6 +130,18 @@ final class CheckoutService
             }
         }
         $this->assertMarginFloor($user, $store->id, $lines, $pricing, $input);
+
+        // Negative stock is never allowed. Name every short item at once (the ledger would stop at the first).
+        if ($short = $this->shortages->forLines($store->id, $lines, $date)) {
+            $first = $short[0];
+            throw new BusinessRuleException(
+                count($short) === 1
+                    ? "Not enough stock of {$first['name']}: needs {$first['needs']}, only {$first['available']}."
+                    : count($short).' items do not have enough stock. See the list and change the quantities.',
+                'insufficient_stock',
+                ['variant_id' => $first['variant_id'], 'available' => $first['available'], 'shortages' => $short],
+            );
+        }
 
         if (isset($input['expected_total']) && ! Decimal::eq($input['expected_total'], $pricing['total'])) {
             throw new BusinessRuleException(
@@ -175,7 +195,7 @@ final class CheckoutService
 
     /**
      * @param  list<array<string, mixed>>  $rawLines
-     * @return array{0: list<SaleLine>, 1: list<int>}
+     * @return array{0: list<SaleLine>, 1: list<int>, 2: list<array<string, mixed>|null>}  lines, approvals, what the price rules did per line
      */
     private function buildLines(User $user, Register $register, ?Contact $customer, array $rawLines, string $date, bool $dryRun): array
     {
@@ -187,7 +207,9 @@ final class CheckoutService
         $lines = [];
         $approvalIds = [];
 
-        foreach ($rawLines as $raw) {
+        // First every line's list price, then the price rules over the whole cart (they look at quantities and the bill total).
+        $prepared = [];
+        foreach (array_values($rawLines) as $index => $raw) {
             $variant = ProductVariant::query()->with(['product', 'units.unit'])->where('is_active', true)->find($raw['variant_id']);
             if ($variant === null || ! $variant->product?->is_active) {
                 throw new BusinessRuleException('A product in the cart is no longer sold. Remove it and scan again.', 'product_inactive', ['variant_id' => $raw['variant_id']]);
@@ -198,7 +220,13 @@ final class CheckoutService
                 throw new BusinessRuleException("{$variant->displayName()} cannot be sold in that pack size.", 'unit_not_sellable');
             }
             $quantity = Decimal::qty($raw['quantity']);
-            $baseQuantity = Units::toBase($quantity, $unit);
+            $prepared[$index] = ['raw' => $raw, 'variant' => $variant, 'unit' => $unit, 'quantity' => $quantity, 'base_quantity' => Units::toBase($quantity, $unit),
+                'baseline' => $variant->product->is_open_item ? null : ($this->prices->resolve($variant, $unit, $priceBookId, $quantity)['price'] ?? null)];
+        }
+        $ruled = $this->rules->apply(array_filter($prepared, fn($p) => ! $p['variant']->product->is_open_item), new \App\Domain\Catalog\PriceContext($register->store_id, $customer, $date));
+
+        foreach ($prepared as $index => $p) {
+            ['raw' => $raw, 'variant' => $variant, 'unit' => $unit, 'quantity' => $quantity, 'base_quantity' => $baseQuantity] = $p;
 
             if ($variant->product->is_open_item) {
                 $lines[] = $this->unlistedLine($variant, $unit, $quantity, $baseQuantity, $raw, $date);
@@ -206,15 +234,14 @@ final class CheckoutService
                 continue;
             }
 
-            $resolved = $this->prices->resolve($variant, $unit, $priceBookId, $quantity);
-            $listPrice = $resolved['price'] ?? null;
+            $listPrice = $ruled[$index]['price'] ?? $p['baseline'];
             $unitPrice = isset($raw['unit_price']) && $raw['unit_price'] !== null ? Decimal::money($raw['unit_price']) : $listPrice;
             $approvalId = null;
 
             if ($listPrice === null) {
                 // No price set: only an approved manual price can sell it.
                 if ($unitPrice === null) {
-                    throw new BusinessRuleException("{$variant->displayName()} has no price. Set a price in Products, or ask a manager to approve a manual price.", 'price_missing', ['variant_id' => $variant->id]);
+                    throw new BusinessRuleException("{$variant->displayName()} has no In-store price. Set one in Products, or ask a manager to approve a manual price.", 'price_missing', ['variant_id' => $variant->id]);
                 }
                 $listPrice = $unitPrice;
                 $approvalId = $this->overrideApproval($user, $register->store_id, $raw, $dryRun);
@@ -222,7 +249,7 @@ final class CheckoutService
                 $approvalId = $this->overrideApproval($user, $register->store_id, $raw, $dryRun);
             }
             if ($enforceMrp && $variant->mrp !== null && Decimal::gt($unitPrice, Decimal::mul($variant->mrp, $unit->factor))) {
-                throw new BusinessRuleException("{$variant->displayName()} cannot be sold above its printed price (MRP Rs " . Decimal::money(Decimal::mul($variant->mrp, $unit->factor)) . ').', 'above_mrp');
+                throw new BusinessRuleException("{$variant->displayName()} cannot be sold above its Market price (MRP Rs " . Decimal::money(Decimal::mul($variant->mrp, $unit->factor)) . ').', 'above_mrp');
             }
             if ($approvalId) {
                 $approvalIds[] = $approvalId;
@@ -241,10 +268,11 @@ final class CheckoutService
                 discount: $this->lineDiscount($raw),
                 discountReasonId: $raw['discount_reason_id'] ?? null,
                 approvalId: $approvalId,
+                priceRuleId: $ruled[$index]['rule_id'] ?? null,
             );
         }
 
-        return [$lines, $approvalIds];
+        return [$lines, $approvalIds, array_map(fn($i) => $ruled[$i] ?? null, array_keys($prepared))];
     }
 
     /**

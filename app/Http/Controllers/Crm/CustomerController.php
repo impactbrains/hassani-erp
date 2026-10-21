@@ -16,6 +16,8 @@ use App\Models\SalesInvoice;
 use App\Models\SalesOrder;
 use App\Models\Tag;
 use App\Support\Audit;
+use App\Support\Pager;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -29,15 +31,8 @@ class CustomerController extends Controller
     {
         $this->allow($request, 'crm.customers.view');
         $user = $request->user();
-        $balances = DB::table('journal_lines as jl')->join('accounts as a', 'a.id', '=', 'jl.account_id')->where('a.system_key', 'accounts_receivable')->whereNotNull('jl.contact_id')
-            ->groupBy('jl.contact_id')->selectRaw('jl.contact_id, SUM(jl.debit - jl.credit) AS khata_balance');
-        $customers = Contact::query()->customers()->search($request->string('q')->toString() ?: null)->with('customerProfile:id,contact_id,category,credit_limit,credit_status', 'tags:id,name,color')
-            ->leftJoinSub($balances, 'b', 'b.contact_id', '=', 'contacts.id')->select('contacts.*', 'b.khata_balance')
-            ->when($request->query('category'), fn ($q, $c) => $q->whereHas('customerProfile', fn ($p) => $p->where('category', $c)))
-            ->when($request->query('with_balance'), fn ($q) => $q->where('b.khata_balance', '>', 0))
-            ->when($request->query('area'), fn ($q, $a) => $q->where('area', 'ilike', $a))
-            ->when($request->query('sort') === 'balance', fn ($q) => $q->orderByDesc('b.khata_balance'), fn ($q) => $q->orderBy('name'))
-            ->paginate($this->perPage($request, 30))->withQueryString();
+        Pager::remember($request, 'crm.customers');
+        $customers = $this->listQuery($request)->with('customerProfile:id,contact_id,category,credit_limit,credit_status', 'tags:id,name,color')->paginate($this->perPage($request, 30))->withQueryString();
         if (! $user->hasPermission('crm.customers.contact_details')) {
             $customers->getCollection()->each->makeHidden(['phone', 'alt_phone', 'email', 'address', 'phone_normalized']);
         }
@@ -46,6 +41,21 @@ class CustomerController extends Controller
         }
 
         return Inertia::render('crm/Customers', ['customers' => $customers, 'filters' => $request->only(['q', 'category', 'with_balance', 'area', 'sort']), 'canExport' => $user->hasPermission('crm.customers.export')]);
+    }
+
+    /** The customers list as filtered on screen. The next / previous arrows on a customer walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        $balances = DB::table('journal_lines as jl')->join('accounts as a', 'a.id', '=', 'jl.account_id')->where('a.system_key', 'accounts_receivable')->whereNotNull('jl.contact_id')
+            ->groupBy('jl.contact_id')->selectRaw('jl.contact_id, SUM(jl.debit - jl.credit) AS khata_balance');
+
+        return Contact::query()->customers()->search($request->string('q')->toString() ?: null)
+            ->leftJoinSub($balances, 'b', 'b.contact_id', '=', 'contacts.id')->select('contacts.*', 'b.khata_balance')
+            ->when($request->query('category'), fn ($q, $c) => $q->whereHas('customerProfile', fn ($p) => $p->where('category', $c)))
+            ->when($request->query('with_balance'), fn ($q) => $q->where('b.khata_balance', '>', 0))
+            ->when($request->query('area'), fn ($q, $a) => $q->where('area', 'ilike', $a))
+            ->when($request->query('sort') === 'balance', fn ($q) => $q->orderByDesc('b.khata_balance'), fn ($q) => $q->orderBy('name'))
+            ->orderBy('contacts.id');
     }
 
     public function create(Request $request): Response
@@ -79,6 +89,7 @@ class CustomerController extends Controller
 
         return Inertia::render('crm/CustomerShow', [
             'customer' => $customer,
+            'pager' => Pager::for($request, 'crm.customers', $customer->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('crm.customers.show', $id)),
             'khata' => $canKhata ? ['balance' => $credit->balance($customer->id), 'statement' => $khata->statement($customer, $from, $to), 'aging' => $khata->aging($customer->id, $today)] : null,
             'promises' => $canKhata ? PaymentPromise::query()->where('contact_id', $customer->id)->with('recorder:id,name')->latest('promised_date')->limit(20)->get() : [],
             'interactions' => CrmInteraction::query()->where('contact_id', $customer->id)->when(! $user->hasPermission('crm.notes.sensitive'), fn ($q) => $q->where('is_sensitive', false))->with('user:id,name')->latest('occurred_at')->limit(50)->get(),
@@ -146,6 +157,42 @@ class CustomerController extends Controller
         Audit::record('crm.activity', "Added {$kind} for {$customer->name}", $customer);
 
         return back()->with('success', 'Saved.');
+    }
+
+    /**
+     * A complaint written from the Follow-ups screen. With no customer picked it is a walk-in customer's complaint
+     * (optionally with their name and phone). A customer that does not exist yet is added from the search box first.
+     */
+    public function storeCase(Request $request): RedirectResponse
+    {
+        $this->allow($request, 'crm.cases.manage');
+        $data = $request->validate([
+            'customer_id' => ['nullable', 'integer'], 'walk_in_name' => ['nullable', 'string', 'max:120'], 'walk_in_phone' => ['nullable', 'string', 'max:30'],
+            'type' => ['required', 'in:complaint,return_request,quality,delivery,billing,other'], 'subject' => ['required', 'string', 'max:200'], 'description' => ['nullable', 'string', 'max:2000'],
+            'priority' => ['nullable', 'in:low,normal,high,urgent'], 'due_at' => ['nullable', 'date'],
+        ]);
+        $customer = ! empty($data['customer_id']) ? Contact::query()->customers()->findOrFail($data['customer_id']) : null;
+        $case = CrmCase::create([
+            'contact_id' => $customer?->id, 'walk_in_name' => $customer ? null : ($data['walk_in_name'] ?? null), 'walk_in_phone' => $customer ? null : ($data['walk_in_phone'] ?? null),
+            'store_id' => $request->attributes->get('store_id'), 'number' => \App\Support\Sequences::next('crm_case'), 'type' => $data['type'], 'subject' => $data['subject'], 'description' => $data['description'] ?? null,
+            'status' => 'open', 'priority' => $data['priority'] ?? 'normal', 'due_at' => $data['due_at'] ?? null, 'owner_id' => $request->user()->id, 'created_by' => $request->user()->id,
+        ]);
+        Audit::record('crm.activity', "Added complaint {$case->number} for ".($customer?->name ?? 'a walk-in customer'), $case);
+
+        return back()->with('success', "Complaint {$case->number} added.");
+    }
+
+    /** Adds a customer from the search box (for example in the middle of writing a complaint) and returns it as JSON. */
+    public function quickStore(Request $request, CustomerService $customers): JsonResponse
+    {
+        $this->allow($request, 'crm.customers.manage');
+        $data = $request->validate(['name' => ['required', 'string', 'max:200'], 'phone' => ['nullable', 'string', 'max:30'], 'area' => ['nullable', 'string', 'max:120'], 'confirm_not_duplicate' => ['boolean']]);
+        if (! $request->boolean('confirm_not_duplicate') && ($matches = $customers->duplicates($data['name'], $data['phone'] ?? null))->isNotEmpty()) {
+            return response()->json(['message' => 'This customer may already exist.', 'code' => 'possible_duplicate', 'details' => ['matches' => $matches]], 422);
+        }
+        $customer = $customers->save($request->user(), ['name' => trim($data['name']), 'phone' => $data['phone'] ?? null, 'area' => $data['area'] ?? null, 'confirm_not_duplicate' => true]);
+
+        return response()->json($customer->only(['id', 'code', 'name', 'name_ur', 'phone', 'area']), 201);
     }
 
     public function updateFollowUp(Request $request, CrmFollowUp $followUp): RedirectResponse

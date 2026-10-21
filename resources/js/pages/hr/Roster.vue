@@ -2,12 +2,15 @@
 import { computed } from 'vue';
 import { router } from '@inertiajs/vue3';
 import PageHeader from '@/components/ui/PageHeader.vue';
+import LinkedText from '@/components/ui/LinkedText.vue';
 import Button from '@/components/ui/Button.vue';
+import { can } from '@/lib/perms';
 import { t } from '@/lib/i18n';
 import { colorHex } from '@/lib/colors';
 
 /** Weekly shift plan. Pick a shift per person per day; leave the box empty for a day off. */
 const props = defineProps<{ week: string; days: string[]; employees: any[]; shifts: any[]; entries: any[]; canManage: boolean }>();
+const shiftsHref = can('hr.policies.manage') ? route('settings.lists', { list: 'work-shifts' }) : null;
 const at = computed(() => Object.fromEntries(props.entries.map((e) => [`${e.contact_id}|${String(e.work_date).slice(0, 10)}`, e.work_shift_id])));
 function set(contactId: number, day: string, value: string) {
     router.post(route('hr.roster.assign'), { contact_id: contactId, date: day, work_shift_id: value ? Number(value) : null }, { preserveScroll: true, preserveState: true, only: ['entries'] });
@@ -28,7 +31,8 @@ const color = (id: number | undefined) => colorHex(props.shifts.find((s) => s.id
 </script>
 
 <template>
-    <PageHeader :title="t('Roster')" :subtitle="t('Who works which shift this week. Shifts are set up in Settings → Lists.')">
+    <PageHeader :title="t('Roster')">
+        <template #subtitle><LinkedText :text="t('Who works which shift this week. Shifts are set up in Settings → Lists.')" :phrases="['Settings → Lists', 'ترتیبات → فہرستیں']" :href="shiftsHref" /></template>
         <template #actions><Button @click="shiftWeek(-1)">‹ {{ t('Previous week') }}</Button><Button @click="shiftWeek(1)">{{ t('Next week') }} ›</Button></template>
     </PageHeader>
     <section class="panel overflow-x-auto">
@@ -47,5 +51,5 @@ const color = (id: number | undefined) => colorHex(props.shifts.find((s) => s.id
             </tbody>
         </table>
     </section>
-    <p v-if="!shifts.length" class="mt-3 text-sm text-haldi-800">{{ t('No shifts defined yet. Add them in Settings → Lists → Work shifts.') }}</p>
+    <p v-if="!shifts.length" class="mt-3 text-sm text-haldi-800"><LinkedText :text="t('No shifts defined yet. Add them in Settings → Lists → Work shifts.')" :phrases="['Settings → Lists → Work shifts', 'ترتیبات → فہرستیں → کام کی شفٹیں']" :href="shiftsHref" /></p>
 </template>

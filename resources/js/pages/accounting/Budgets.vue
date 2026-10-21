@@ -37,7 +37,7 @@ function save() {
             <thead><tr><th class="min-w-[14rem]">{{ t(g.label) }}</th><th v-for="(n, i) in names" :key="i" class="num">{{ t(n) }}</th><th class="num">{{ t('Year') }}</th></tr></thead>
             <tbody>
                 <tr v-for="a in g.rows" :key="a.id">
-                    <td>{{ a.code }} {{ a.name }} <button v-if="canManage" class="link ms-1 text-[11px]" :title="t('Copy January to all months')" @click="fill(a.id)">→</button></td>
+                    <td><span class="me-2 inline-block w-14 tabular-nums text-ink-500">{{ a.code }}</span>{{ a.name }} <button v-if="canManage" class="link ms-1 text-[11px]" :title="t('Copy January to all months')" @click="fill(a.id)">→</button></td>
                     <td v-for="m in months" :key="m" class="p-1"><input v-model="grid[`${a.id}|${m}`]" type="number" min="0" class="input w-24 px-1.5 py-1 text-end text-[13px]" :disabled="!canManage" /></td>
                     <td class="num font-medium">{{ money(rowTotal(a.id)) }}</td>
                 </tr>

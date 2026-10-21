@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { router, useForm } from '@inertiajs/vue3';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
+import Badge from '@/components/ui/Badge.vue';
 import Field from '@/components/form/Field.vue';
 import ContactPicker from '@/components/app/ContactPicker.vue';
 import { useOptions } from '@/composables/useOptions';
@@ -59,7 +60,7 @@ function submit() {
                     <tbody>
                         <tr v-for="p in recent" :key="p.id">
                             <td>{{ p.number }}</td><td>{{ dateTime(p.received_at) }}</td><td>{{ p.contact?.name }}</td><td>{{ p.method?.name }}<span v-if="p.reference" class="text-[12px] text-ink-500"> · {{ p.reference }}</span></td>
-                            <td class="num">{{ money(p.amount) }}</td><td><span class="text-[12.5px]">{{ t(p.verification_status ?? '') }}</span></td><td>{{ p.receiver?.name }}</td>
+                            <td class="num">{{ money(p.amount) }}</td><td><Badge v-if="p.verification_status" :status="p.verification_status" /></td><td>{{ p.receiver?.name }}</td>
                         </tr>
                         <tr v-if="!recent.length"><td colspan="7" class="py-6 text-center text-ink-500">{{ t('Nothing yet.') }}</td></tr>
                     </tbody>

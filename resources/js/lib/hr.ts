@@ -1,3 +1,5 @@
+import { appTimezone, instant } from './format';
+
 /** Labels shared by the HR screens. */
 export const roleTypes: Record<string, string> = { cashier: 'Cashier', sales_agent: 'Sales agent', rider: 'Rider', warehouse: 'Godown / warehouse', supervisor: 'Supervisor', manager: 'Manager', admin: 'Office / admin', other: 'Other' };
 export const employmentTypes: Record<string, string> = { permanent: 'Permanent', probation: 'On probation', contract: 'Contract', daily_wage: 'Daily wage', part_time: 'Part time' };
@@ -10,5 +12,5 @@ export function minutes(m: number | null | undefined): string {
 }
 export function clock(v: string | null | undefined): string {
     if (!v) return '—';
-    return new Date(v).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Karachi' });
+    return instant(v).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: appTimezone() });
 }

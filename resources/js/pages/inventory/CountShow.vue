@@ -15,7 +15,7 @@ import { localName, t } from '@/lib/i18n';
  * Counting screen. Each quantity saves as soon as you leave the box, so
  * several people can count different aisles at the same time.
  */
-const props = defineProps<{ count: any; hideExpected: boolean; needsSecondCount: number[]; can: { manage: boolean; approve: boolean } }>();
+const props = defineProps<{ pager?: any; count: any; hideExpected: boolean; needsSecondCount: number[]; can: { manage: boolean; approve: boolean } }>();
 const options = useOptions(['reasons:adjustment', 'reasons:write_off']);
 const reasonList = computed(() => [...(options['reasons:adjustment'] ?? []), ...(options['reasons:write_off'] ?? [])]);
 const { here: locations } = useStoreLocations();
@@ -74,7 +74,7 @@ async function addLine(p: any) {
 </script>
 
 <template>
-    <PageHeader :title="`${t('Count')} ${count.number}`" :subtitle="`${count.store?.name} · ${count.assignee?.name ?? t('Anyone')} · ${count.is_blind ? t('Blind') : t('Open')}`">
+    <PageHeader :pager="pager" :title="`${t('Count')} ${count.number}`" :subtitle="`${count.store?.name} · ${count.assignee?.name ?? t('Anyone')} · ${count.is_blind ? t('Blind') : t('Open')}`">
         <template #actions>
             <Badge :status="status" />
             <Button v-if="status === 'draft' && can.manage" variant="primary" @click="act('start')">{{ t('Start counting') }}</Button>

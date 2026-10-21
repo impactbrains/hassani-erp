@@ -1,8 +1,9 @@
 # Puts a "Hassani ERP" shortcut on the Desktop and, if you agree, in the Startup folder
 # so the app starts by itself when the shop computer is switched on.
 $Root = Split-Path -Parent $PSScriptRoot
-$target = Join-Path $Root 'Start Hassani ERP.exe'
-if (-not (Test-Path $target)) { $target = Join-Path $Root 'Start Hassani ERP.bat' }
+# Point at the .bat (it always shows errors); it runs the same starter\start.ps1 as the .exe and the shortcut still gets the Hassani icon.
+$target = Join-Path $Root 'Start Hassani ERP.bat'
+if (-not (Test-Path $target)) { $target = Join-Path $Root 'Start Hassani ERP.exe' }
 $icon = Join-Path $Root 'starter\hassani.ico'
 $shell = New-Object -ComObject WScript.Shell
 

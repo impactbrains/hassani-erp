@@ -7,7 +7,7 @@ declare global {
 export interface StoreRef { id: number; code?: string; name: string; name_ur?: string | null }
 
 export interface SharedProps {
-    app: { name: string; company: { id: number; name: string; currency: string; timezone: string } | null };
+    app: { name: string; timezone: string; company: { id: number; name: string; currency: string; timezone: string } | null };
     auth: { user: { id: number; name: string; email: string; is_owner: boolean; has_pin: boolean; two_factor: boolean }; permissions: string[]; stores: StoreRef[]; store_id: number | null } | null;
     locale: 'en' | 'ur';
     flash: { success?: string | null; error?: string | null; secret?: { label: string; value: string; note?: string } | null };

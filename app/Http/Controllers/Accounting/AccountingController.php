@@ -11,6 +11,7 @@ use App\Models\FiscalPeriod;
 use App\Models\JournalEntry;
 use App\Support\Audit;
 use App\Support\Decimal;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -58,7 +59,10 @@ class AccountingController extends Controller
             return (array) $l + ['balance' => Decimal::money($running)];
         });
 
-        return Inertia::render('accounting/AccountShow', ['account' => $account, 'opening' => Decimal::money(Decimal::mul($opening, (string) $sign)), 'lines' => $rows, 'closing' => Decimal::money($running), 'filters' => ['from' => $from, 'to' => $to]]);
+        // The arrows keep the date range on screen, so stepping to the next account shows the same period.
+        $pager = Pager::for($request, 'accounting.accounts', $account->id, fn (Request $r) => Account::query()->orderBy('code')->orderBy('id'), fn (int $id) => route('accounting.accounts.show', ['account' => $id] + $request->only(['from', 'to'])));
+
+        return Inertia::render('accounting/AccountShow', ['pager' => $pager, 'account' => $account, 'opening' => Decimal::money(Decimal::mul($opening, (string) $sign)), 'lines' => $rows, 'closing' => Decimal::money($running), 'filters' => ['from' => $from, 'to' => $to]]);
     }
 
     public function saveAccount(Request $request, ?Account $account = null): RedirectResponse
@@ -78,16 +82,24 @@ class AccountingController extends Controller
     public function journals(Request $request): Response
     {
         $this->allow($request, 'accounting.view');
-        $q = trim((string) $request->query('q'));
+        Pager::remember($request, 'accounting.journals');
 
         return Inertia::render('accounting/Journals', [
-            'journals' => JournalEntry::query()->where('status', 'posted')->with('creator:id,name')->withSum('lines', 'debit')
-                ->when($request->query('kind'), fn ($w, $k) => $w->where('kind', $k))
-                ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('number', 'ilike', "%{$q}%")->orWhere('description', 'ilike', "%{$q}%")))
-                ->when($request->query('from'), fn ($w, $d) => $w->where('entry_date', '>=', $d))->when($request->query('to'), fn ($w, $d) => $w->where('entry_date', '<=', $d))
-                ->latest('id')->paginate($this->perPage($request, 50))->withQueryString(),
+            'journals' => $this->journalsQuery($request)->with('creator:id,name')->withSum('lines', 'debit')->paginate($this->perPage($request, 50))->withQueryString(),
             'filters' => $request->only(['q', 'kind', 'from', 'to']),
         ]);
+    }
+
+    /** The journal entries list as filtered on screen. The next / previous arrows on an entry walk through this same list. */
+    private function journalsQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        $q = trim((string) $request->query('q'));
+
+        return JournalEntry::query()->where('status', 'posted')
+            ->when($request->query('kind'), fn ($w, $k) => $w->where('kind', $k))
+            ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('number', 'ilike', "%{$q}%")->orWhere('description', 'ilike', "%{$q}%")))
+            ->when($request->query('from'), fn ($w, $d) => $w->where('entry_date', '>=', $d))->when($request->query('to'), fn ($w, $d) => $w->where('entry_date', '<=', $d))
+            ->latest('id');
     }
 
     public function journal(Request $request, JournalEntry $journal): Response
@@ -95,6 +107,7 @@ class AccountingController extends Controller
         $this->allow($request, 'accounting.view');
 
         return Inertia::render('accounting/JournalShow', [
+            'pager' => Pager::for($request, 'accounting.journals', $journal->id, fn (Request $r) => $this->journalsQuery($r), fn (int $id) => route('accounting.journals.show', $id)),
             'journal' => $journal->load('lines.account:id,code,name', 'lines.contact:id,name', 'creator:id,name', 'reversalOf:id,number', 'reversal:id,number,reversal_of_id', 'store:id,name'),
             'source' => $journal->source_type ? ['type' => class_basename($journal->source_type), 'id' => $journal->source_id] : null,
             'canReverse' => $request->user()->hasPermission('accounting.journals.post') && ! $journal->reversal_of_id,

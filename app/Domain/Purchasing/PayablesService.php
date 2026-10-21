@@ -51,6 +51,18 @@ final class PayablesService
     public function postBill(User $user, Store $store, array $data): SupplierBill
     {
         $this->authorize($user, 'purchasing.bills.manage', $store->id);
+
+        return $this->recordBill($user, $store, $data);
+    }
+
+    /**
+     * Posts a bill without checking the bills permission. Only for callers that checked their own
+     * permission first (Purchase stock bills the goods it has just received).
+     *
+     * @param  array<string, mixed>  $data  same shape as postBill()
+     */
+    public function recordBill(User $user, Store $store, array $data): SupplierBill
+    {
         $supplier = Contact::query()->ofType('supplier')->findOrFail($data['supplier_id']);
 
         return DB::transaction(function () use ($user, $store, $data, $supplier) {
@@ -120,6 +132,18 @@ final class PayablesService
     public function paySupplier(User $user, Store $store, array $data): Payment
     {
         $this->authorize($user, 'purchasing.payments.make', $store->id);
+
+        return $this->recordPayment($user, $store, $data);
+    }
+
+    /**
+     * Pays a supplier without checking the payments permission. Only for callers that checked their
+     * own permission first (Purchase stock paid on the spot).
+     *
+     * @param  array<string, mixed>  $data  same shape as paySupplier()
+     */
+    public function recordPayment(User $user, Store $store, array $data): Payment
+    {
         if (! empty($data['idempotency_key']) && ($existing = Payment::query()->where('idempotency_key', $data['idempotency_key'])->first())) {
             return $existing;
         }

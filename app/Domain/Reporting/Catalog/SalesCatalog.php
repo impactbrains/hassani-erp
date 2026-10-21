@@ -133,10 +133,10 @@ final class SalesCatalog
             [
                 'key' => 'sales.by_hour', 'section' => 'sales', 'title' => 'Sales by hour and weekday', 'permission' => 'reports.sales',
                 'description' => 'When customers buy: transactions and sales for each hour of the day and day of the week. Use it for staffing and shift planning.',
-                'definition' => ['source' => 'Posted invoices', 'date_basis' => 'Time the sale was posted, in the business time zone'],
+                'definition' => ['source' => 'Posted invoices', 'date_basis' => 'Time the sale was posted, in each store\'s own time zone'],
                 'columns' => ['hour' => ['label' => 'Hour', 'type' => 'text'], 'mon' => $money('Mon'), 'tue' => $money('Tue'), 'wed' => $money('Wed'), 'thu' => $money('Thu'), 'fri' => $money('Fri'), 'sat' => $money('Sat'), 'sun' => $money('Sun'), 'transactions' => ['label' => 'Transactions', 'type' => 'int'], 'total' => $money('Total')],
                 'rows' => function (F $f) {
-                    $local = "(i.posted_at AT TIME ZONE '{$f->timezone}')";
+                    $local = $f->localTimeSql('i.posted_at', 'i.store_id');
                     $day = fn (int $dow) => "SUM(CASE WHEN EXTRACT(ISODOW FROM {$local}) = {$dow} THEN i.subtotal - i.discount_total ELSE 0 END)";
 
                     return self::invoices($f)->groupByRaw("EXTRACT(HOUR FROM {$local})")
@@ -254,7 +254,7 @@ final class SalesCatalog
                 'key' => 'products.price_changes', 'section' => 'products', 'title' => 'Price change history', 'permission' => 'reports.products',
                 'description' => 'Every selling price change with who made it, the old and new price, and units sold in the 14 days before and after.',
                 'definition' => ['source' => 'Effective-dated price history', 'date_basis' => 'Date the new price took effect', 'limitations' => ['Before/after sales also move with season and stock; this shows correlation, not cause.']],
-                'columns' => ['changed_at' => ['label' => 'Changed', 'type' => 'datetime'], 'product' => ['label' => 'Product', 'type' => 'text'], 'price_book' => ['label' => 'Price book', 'type' => 'text'], 'old_price' => $money('Old price'), 'new_price' => $money('New price'), 'change_percent' => ['label' => 'Change %', 'type' => 'percent'], 'units_before' => ['label' => 'Units 14d before', 'type' => 'qty'], 'units_after' => ['label' => 'Units 14d after', 'type' => 'qty'], 'changed_by' => ['label' => 'Changed by', 'type' => 'text']],
+                'columns' => ['changed_at' => ['label' => 'Changed', 'type' => 'datetime'], 'product' => ['label' => 'Product', 'type' => 'text'], 'price_book' => ['label' => 'Price list', 'type' => 'text'], 'old_price' => $money('Old price'), 'new_price' => $money('New price'), 'change_percent' => ['label' => 'Change %', 'type' => 'percent'], 'units_before' => ['label' => 'Units 14d before', 'type' => 'qty'], 'units_after' => ['label' => 'Units 14d after', 'type' => 'qty'], 'changed_by' => ['label' => 'Changed by', 'type' => 'text']],
                 'rows' => fn (F $f, DefinedReport $r) => DB::query()->fromSub(DB::table('prices as pr')->join('product_variants as v', 'v.id', '=', 'pr.variant_id')->join('products as p', 'p.id', '=', 'v.product_id')
                     ->join('price_books as pb', 'pb.id', '=', 'pr.price_book_id')->leftJoin('users as u', 'u.id', '=', 'pr.created_by')
                     ->where('pr.company_id', CurrentCompany::require())

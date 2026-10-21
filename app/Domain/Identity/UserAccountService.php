@@ -26,7 +26,7 @@ use Illuminate\Support\Str;
 final class UserAccountService
 {
     /**
-     * @param  array{name: string, email: string, locale?: string|null, employee_id?: int|null}  $data
+     * @param  array{name: string, email: string, locale?: string|null, employee_id?: int|null, temporary_password?: string|null}  $data
      * @param  list<array{role_id: int, store_id?: int|null, expires_at?: string|null}>  $roles
      * @return array{user: User, temporary_password: string}
      */
@@ -39,7 +39,7 @@ final class UserAccountService
         }
 
         return DB::transaction(function () use ($actor, $data, $roles, $email) {
-            $temporary = Str::password(14, symbols: false);
+            $temporary = ! empty($data['temporary_password']) ? (string) $data['temporary_password'] : Str::password(14, symbols: false);
             $user = new User(['name' => $data['name'], 'email' => $email, 'password' => $temporary, 'locale' => $data['locale'] ?? null, 'must_change_password' => true]);
             $user->company_id = CurrentCompany::require();
             $user->status = User::STATUS_ACTIVE;
@@ -111,6 +111,24 @@ final class UserAccountService
     public function suspendForHr(User $actor, User $user, string $reason): User
     {
         return $this->changeStatus($actor, $user, User::STATUS_SUSPENDED, $reason, checkPermission: false);
+    }
+
+    /** Used by HR when an employee is reinstated or rehired: the login comes back with them. */
+    public function reactivateForHr(User $actor, User $user, string $reason): User
+    {
+        return $this->changeStatus($actor, $user, User::STATUS_ACTIVE, $reason, checkPermission: false);
+    }
+
+    /** Whether this actor may give the role to someone (the same rule assignRoles enforces). */
+    public function canGrant(User $actor, Role $role): bool
+    {
+        try {
+            $this->assertCanGrant($actor, $role);
+
+            return true;
+        } catch (BusinessRuleException) {
+            return false;
+        }
     }
 
     public function reactivate(User $actor, User $user): User

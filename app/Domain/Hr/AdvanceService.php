@@ -83,7 +83,7 @@ final class AdvanceService
                 throw new BusinessRuleException('Only an approved advance can be paid out.', 'invalid_status');
             }
             $method = PaymentMethod::query()->findOrFail($paymentMethodId);
-            $date = now()->setTimezone('Asia/Karachi')->toDateString();
+            $date = now()->setTimezone(\App\Support\Tenancy\CurrentCompany::get()?->timezone ?? 'Asia/Karachi')->toDateString();
             if ($method->type === 'cash' && $shiftId) {
                 $shift = Shift::query()->where('status', 'open')->findOrFail($shiftId);
                 $available = app(\App\Domain\Pos\ShiftReport::class)->expectedCash($shift);

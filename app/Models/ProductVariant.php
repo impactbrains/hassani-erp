@@ -20,6 +20,7 @@ class ProductVariant extends Model
 
     protected $casts = [
         'mrp' => 'decimal:2',
+        'purchase_price' => 'decimal:4',
         'attributes' => 'array',
         'is_loose' => 'boolean',
         'is_default' => 'boolean',
@@ -49,6 +50,11 @@ class ProductVariant extends Model
     public function prices(): HasMany
     {
         return $this->hasMany(Price::class, 'variant_id');
+    }
+
+    public function priceRules(): HasMany
+    {
+        return $this->hasMany(PriceRule::class, 'variant_id')->orderBy('sort_order')->orderBy('id');
     }
 
     public function bundleComponents(): HasMany

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Hr;
 
 use App\Domain\Hr\LeaveService;
 use App\Http\Controllers\Controller;
+use App\Models\AttendanceBreak;
 use App\Models\AttendanceRecord;
 use App\Models\EmployeeAdvance;
 use App\Models\LeaveRequest;
@@ -28,6 +29,7 @@ class SelfServiceController extends Controller
         return Inertia::render('hr/Me', [
             'employee' => $me->only(['id', 'name']),
             'today' => AttendanceRecord::query()->where('contact_id', $me->id)->where('work_date', $today)->first(),
+            'breaksToday' => AttendanceBreak::query()->where('contact_id', $me->id)->where('work_date', $today)->orderBy('started_at')->get(['id', 'type', 'started_at', 'ended_at', 'minutes', 'is_unpaid', 'entered_by_role']),
             'attendance' => AttendanceRecord::query()->where('contact_id', $me->id)->where('work_date', '>=', now()->subDays(31)->toDateString())->orderByDesc('work_date')->get(),
             'shifts' => RosterEntry::query()->where('contact_id', $me->id)->where('work_date', '>=', $today)->where('status', 'scheduled')->with('workShift:id,name,start_time,end_time')->orderBy('work_date')->limit(14)->get(),
             'leave' => LeaveRequest::query()->where('contact_id', $me->id)->with('leaveType:id,name')->latest('start_date')->limit(20)->get(),

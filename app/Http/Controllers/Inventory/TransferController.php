@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Inventory;
 use App\Domain\Inventory\TransferService;
 use App\Http\Controllers\Controller;
 use App\Models\StockTransfer;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -15,14 +16,21 @@ class TransferController extends Controller
 {
     public function index(Request $request): Response
     {
-        $stores = $request->user()->accessibleStoreIds();
+        Pager::remember($request, 'inventory.transfers');
 
         return Inertia::render('inventory/Transfers', [
-            'transfers' => StockTransfer::query()->where(fn ($q) => $q->whereIn('from_store_id', $stores)->orWhereIn('to_store_id', $stores))
-                ->with('fromStore:id,name', 'toStore:id,name', 'fromLocation:id,name', 'toLocation:id,name', 'requester:id,name')
-                ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))->latest('id')->paginate($this->perPage($request))->withQueryString(),
+            'transfers' => $this->listQuery($request)->with('fromStore:id,name', 'toStore:id,name', 'fromLocation:id,name', 'toLocation:id,name', 'requester:id,name')->paginate($this->perPage($request))->withQueryString(),
             'filters' => $request->only(['status']),
         ]);
+    }
+
+    /** The transfers list as filtered on screen. The next / previous arrows on a transfer walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        $stores = $request->user()->accessibleStoreIds();
+
+        return StockTransfer::query()->where(fn ($q) => $q->whereIn('from_store_id', $stores)->orWhereIn('to_store_id', $stores))
+            ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))->latest('id');
     }
 
     public function create(Request $request): Response
@@ -46,6 +54,7 @@ class TransferController extends Controller
         abort_unless(array_intersect([$transfer->from_store_id, $transfer->to_store_id], $user->accessibleStoreIds()) !== [], 403);
 
         return Inertia::render('inventory/TransferShow', [
+            'pager' => Pager::for($request, 'inventory.transfers', $transfer->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('inventory.transfers.show', $id)),
             'transfer' => $transfer->load('lines.variant:id,product_id,sku,name', 'lines.variant.product:id,name', 'fromStore:id,name', 'toStore:id,name', 'fromLocation:id,name', 'toLocation:id,name', 'requester:id,name'),
             'can' => [
                 'approve' => $user->hasPermission('inventory.transfers.approve', $transfer->from_store_id),

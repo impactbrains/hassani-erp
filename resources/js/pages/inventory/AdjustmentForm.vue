@@ -21,6 +21,7 @@ import { can } from '@/lib/perms';
 const props = defineProps<{ kind: string }>();
 const kind = ref(props.kind);
 const tabs = [
+    ...(can('inventory.purchase_stock') ? [{ key: 'purchase', label: 'Purchase stock' }] : []),
     { key: 'opening', label: 'Opening stock' }, { key: 'write_off', label: 'Write-off' }, { key: 'adjustment', label: 'Correction' },
     { key: 'quarantine', label: 'Quarantine' }, { key: 'release', label: 'Release from quarantine' },
 ];
@@ -38,7 +39,19 @@ const { here: locations } = useStoreLocations();
 const defaultLocation = computed(() => locations.value.find((l: any) => l.is_sellable)?.id ?? locations.value[0]?.id ?? null);
 
 const form = useForm<{ kind: string; reason_code_id: number | null; note: string; lines: any[] }>({ kind: kind.value, reason_code_id: null, note: '', lines: [] });
-watch(kind, (k) => {
+let goingBack = false;
+watch(kind, (k, previous) => {
+    if (goingBack) {
+        goingBack = false;
+        return;
+    }
+    // "Purchase stock" is its own screen (it also records the supplier's bill and payment).
+    if (k === 'purchase') {
+        goingBack = true;
+        kind.value = previous;
+        router.visit(route('purchasing.purchase-stock'));
+        return;
+    }
     form.kind = k;
     form.reason_code_id = null;
     router.replace({ url: route('inventory.adjustments.create', { kind: k }), preserveState: true });

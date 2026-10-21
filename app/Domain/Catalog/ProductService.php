@@ -13,6 +13,7 @@ use App\Models\VariantUnit;
 use App\Support\Audit;
 use App\Support\Decimal;
 use App\Support\Sequences;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
@@ -22,8 +23,10 @@ use Illuminate\Support\Facades\DB;
  *
  * Invariants: every SKU has exactly one base unit (factor 1); barcodes are
  * unique per company; a price change closes the old price and starts a new
- * effective-dated one (history is never overwritten); SKUs with stock
- * history are deactivated, never deleted.
+ * effective-dated one (history is never overwritten). Deleting a product with
+ * no history sends it to the Trash for 30 days; one with stock or sales
+ * history is deactivated, never erased. SKUs and barcodes stay reserved while
+ * a product is in the Trash or deactivated.
  */
 final class ProductService
 {
@@ -55,6 +58,149 @@ final class ProductService
         });
     }
 
+    /** Days a deleted product stays in the Trash before it is removed for good. */
+    public const TRASH_DAYS = 30;
+
+    /**
+     * "Deletes" a product.
+     *  - Never stocked, sold or bought: it goes to the Trash for 30 days, then is removed.
+     *  - Has stock, sales, purchase or bundle history: it is kept for the books and
+     *    moved to the Deactivated tab. It disappears from the POS either way.
+     * SKUs and barcodes stay reserved in both cases, because the rows are kept.
+     *
+     * @return 'trashed'|'deactivated'
+     */
+    public function remove(Product $product): string
+    {
+        $name = $product->name;
+
+        if ($this->hasHistory($product)) {
+            DB::transaction(function () use ($product) {
+                $product->variants()->update(['is_active' => false]);
+                $product->update(['is_active' => false]);
+            });
+            Audit::record('product.deactivated', "Deactivated product {$name} (it has stock or sales history)", $product);
+
+            return 'deactivated';
+        }
+
+        DB::transaction(function () use ($product) {
+            $product->variants()->update(['is_active' => false]);
+            $product->update(['is_active' => false, 'deleted_by' => Auth::id()]);
+            $product->delete(); // soft delete: sets deleted_at
+        });
+        Audit::record('product.trashed', "Moved product {$name} to the Trash", $product);
+
+        return 'trashed';
+    }
+
+    /** Brings a product back from the Trash or the Deactivated tab, active and sellable again. */
+    public function restore(Product $product): Product
+    {
+        DB::transaction(function () use ($product) {
+            if ($product->trashed()) {
+                $product->restore();
+            }
+            $product->update(['is_active' => true, 'deleted_by' => null]);
+            $product->variants()->update(['is_active' => true]);
+        });
+        Audit::record('product.restored', "Restored product {$product->name}", $product);
+
+        return $product->refresh();
+    }
+
+    /**
+     * Removes a trashed product for good. If history appeared since it was trashed
+     * (it should not, because it cannot be sold), it moves to Deactivated instead.
+     *
+     * @return 'purged'|'deactivated'
+     */
+    public function purge(Product $product): string
+    {
+        $name = $product->name;
+        try {
+            DB::transaction(function () use ($product) {
+                $product->variants()->delete(); // units, barcodes, prices cascade
+                $product->forceDelete();
+            });
+        } catch (QueryException $e) {
+            if (! in_array((string) $e->getCode(), ['23503', '23000'], true)) {
+                throw $e;
+            }
+            $product->refresh();
+            DB::transaction(function () use ($product) {
+                $product->restore();
+                $product->update(['is_active' => false]);
+                $product->variants()->update(['is_active' => false]);
+            });
+            Audit::record('product.deactivated', "{$name} had history, so it was deactivated instead of removed", $product);
+
+            return 'deactivated';
+        }
+        Audit::record('product.purged', "Permanently removed product {$name}", null);
+
+        return 'purged';
+    }
+
+    /** Removes everything that has been in the Trash longer than TRASH_DAYS. Returns how many were removed. */
+    public function purgeExpired(): int
+    {
+        $count = 0;
+        Product::onlyTrashed()->where('deleted_at', '<', now()->subDays(self::TRASH_DAYS))->get()
+            ->each(function (Product $product) use (&$count) {
+                if ($this->purge($product) === 'purged') {
+                    $count++;
+                }
+            });
+
+        return $count;
+    }
+
+    /**
+     * True when anything points at one of the product's SKUs: stock movements, invoices,
+     * purchase lines, use inside a bundle ... The database's foreign keys decide, so every
+     * table that references a variant is covered without listing them here. The probe
+     * deletes inside a transaction and always rolls back.
+     */
+    public function hasHistory(Product $product): bool
+    {
+        try {
+            DB::transaction(function () use ($product) {
+                DB::table('product_variants')->where('product_id', $product->id)->delete();
+                DB::table('products')->where('id', $product->id)->delete();
+                DB::statement('SET CONSTRAINTS ALL IMMEDIATE'); // surface any deferred foreign-key check now
+                throw new ProductDeleteProbe;
+            });
+        } catch (ProductDeleteProbe) {
+            return false;
+        } catch (QueryException $e) {
+            if (! in_array((string) $e->getCode(), ['23503', '23000'], true)) {
+                throw $e;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /** Where a reserved SKU or barcode lives, so the error can say what to do about it. */
+    private function reservedNote(?ProductVariant $holder): string
+    {
+        if ($holder === null) {
+            return '';
+        }
+        $product = Product::withTrashed()->find($holder->product_id);
+        if ($product?->trashed()) {
+            return ' It is in the Trash: restore it, or delete it permanently from the Trash, to use this again.';
+        }
+        if ($product && ! $product->is_active) {
+            return ' It is deactivated: restore it from the Deactivated tab, or give this one a different code.';
+        }
+
+        return '';
+    }
+
     /** @param array<string, mixed> $data */
     private function saveVariant(Product $product, array $data, bool $isFirst, bool $canChangePrices): ProductVariant
     {
@@ -66,8 +212,9 @@ final class ProductService
         if ($sku === '') {
             $sku = $variant->sku ?: Sequences::next('sku');
         }
-        if (ProductVariant::query()->where('sku', $sku)->when($variant->exists, fn ($q) => $q->whereKeyNot($variant->id))->exists()) {
-            throw new BusinessRuleException("SKU {$sku} is already used by another product.", 'duplicate_sku', field: 'sku');
+        $skuHolder = ProductVariant::query()->where('sku', $sku)->when($variant->exists, fn ($q) => $q->whereKeyNot($variant->id))->first();
+        if ($skuHolder) {
+            throw new BusinessRuleException("SKU {$sku} is already used by another product.".$this->reservedNote($skuHolder), 'duplicate_sku', field: 'sku');
         }
 
         $variant->fill([
@@ -81,12 +228,20 @@ final class ProductService
             'is_default' => $isFirst,
             'is_active' => (bool) ($data['is_active'] ?? true),
         ]);
+        // Purchase price is only written when it is sent (people who may not see costs never send it).
+        if (array_key_exists('purchase_price', $data)) {
+            $variant->purchase_price = $data['purchase_price'] !== null && $data['purchase_price'] !== '' ? Decimal::round((string) $data['purchase_price'], 4) : null;
+        }
         $variant->save();
 
         $unitIdMap = $this->saveUnits($variant, $data['units'] ?? []);
         $this->saveBarcodes($variant, $data['barcodes'] ?? [], $unitIdMap);
         if ($canChangePrices) {
             $this->savePrices($variant, $data['prices'] ?? [], $unitIdMap);
+            // Rules are only touched when the form sends them (imports and other callers leave them alone).
+            if (array_key_exists('price_rules', $data) && is_array($data['price_rules'])) {
+                app(PriceRuleService::class)->syncVariant($variant->load('units'), $data['price_rules']);
+            }
         }
         if ($product->type === 'bundle') {
             $this->saveBundle($variant, $data['bundle_components'] ?? []);
@@ -160,7 +315,7 @@ final class ProductService
             $existing = Barcode::query()->where('code', $code)->first();
             if ($existing && $existing->variant_id !== $variant->id) {
                 $owner = $existing->variant?->displayName() ?? 'another product';
-                throw new BusinessRuleException("Barcode {$code} already belongs to {$owner}.", 'duplicate_barcode', field: 'barcodes');
+                throw new BusinessRuleException("Barcode {$code} already belongs to {$owner}.".$this->reservedNote($existing->variant), 'duplicate_barcode', field: 'barcodes');
             }
             $variantUnitId = isset($barcode['unit_id']) ? ($unitIdMap[(int) $barcode['unit_id']] ?? null) : null;
             $model = $existing ?? new Barcode(['variant_id' => $variant->id, 'code' => $code]);
@@ -183,6 +338,11 @@ final class ProductService
     {
         foreach ($prices as $row) {
             if (! isset($row['price']) || $row['price'] === '' || $row['price'] === null) {
+                // Emptying a price on another list (Wholesale ...) removes it. The In-store price is never removed this way.
+                if (! empty($row['clear']) && (int) $row['price_book_id'] !== (int) app(PriceResolver::class)->defaultBookId() && ($variantUnitId = $unitIdMap[(int) $row['unit_id']] ?? null)) {
+                    $this->endPrice($variant, (int) $row['price_book_id'], $variantUnitId);
+                }
+
                 continue;
             }
             $variantUnitId = $unitIdMap[(int) $row['unit_id']] ?? null;
@@ -190,6 +350,17 @@ final class ProductService
                 throw new BusinessRuleException('A price was given for a pack size this product does not have.', 'price_unit_missing', field: 'prices');
             }
             $this->setPrice($variant, (int) $row['price_book_id'], $variantUnitId, Decimal::money((string) $row['price']), Decimal::qty($row['min_quantity'] ?? '1'));
+        }
+    }
+
+    /** Ends the current price of a pack on one list (the field was emptied on the form). */
+    private function endPrice(ProductVariant $variant, int $priceBookId, int $variantUnitId): void
+    {
+        $current = Price::query()->where('price_book_id', $priceBookId)->where('variant_id', $variant->id)->where('variant_unit_id', $variantUnitId)
+            ->where('min_quantity', '<=', 1)->whereNull('effective_to')->get();
+        foreach ($current as $price) {
+            $price->update(['effective_to' => now(), 'note' => 'Removed on the product form']);
+            Audit::record('price.removed', 'Price of '.$variant->sku.' removed', $price, ['price' => $price->price], ['price' => null, 'price_book_id' => $priceBookId]);
         }
     }
 
@@ -258,3 +429,6 @@ final class ProductService
         });
     }
 }
+
+/** Thrown inside the history probe so its transaction always rolls back. */
+final class ProductDeleteProbe extends \RuntimeException {}

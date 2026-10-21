@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers\Hr;
 
+use App\Domain\Hr\EmployeeExportService;
 use App\Domain\Hr\EmployeeService;
+use App\Domain\Identity\UserAccountService;
 use App\Domain\Hr\LeaveService;
 use App\Http\Controllers\Controller;
 use App\Models\AttendanceRecord;
@@ -14,12 +16,16 @@ use App\Models\EmployeeLifecycleEvent;
 use App\Models\JobPosition;
 use App\Models\LeaveRequest;
 use App\Models\LeaveType;
+use App\Models\Role;
 use App\Models\Payslip;
 use App\Models\SalaryStructure;
 use App\Models\User;
 use App\Support\Audit;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rules\Password;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -37,30 +43,44 @@ class EmployeeController extends Controller
     public function index(Request $request): Response
     {
         $this->allow($request, 'hr.employees.view');
+        Pager::remember($request, 'hr.employees');
+        $employees = $this->listQuery($request)->with(['employeeDetail' => fn ($d) => $d->select(['id', 'contact_id', 'employee_no', 'store_id', 'department_id', 'job_title', 'role_type', 'status', 'joining_date'])->with('store:id,name', 'department:id,name'), 'user:id,email,status'])
+            ->paginate($this->perPage($request, 30))->withQueryString();
+
+        return Inertia::render('hr/Employees', ['employees' => $employees, 'filters' => $request->only(['q', 'status', 'store_id', 'department_id']), 'departments' => Department::query()->orderBy('name')->get(['id', 'name'])]);
+    }
+
+    /** The employees list as filtered on screen. The next / previous arrows on an employee walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
         $q = trim((string) $request->query('q'));
-        $employees = Contact::query()->employees()->with(['employeeDetail' => fn ($d) => $d->select(['id', 'contact_id', 'employee_no', 'store_id', 'department_id', 'job_title', 'role_type', 'status', 'joining_date'])->with('store:id,name', 'department:id,name'), 'user:id,email,status'])
+
+        return Contact::query()->employees()
             ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('name', 'ilike', "%{$q}%")->orWhere('phone', 'like', "%{$q}%")->orWhereHas('employeeDetail', fn ($d) => $d->where('employee_no', 'ilike', "%{$q}%"))))
             ->when($request->query('status', 'current') === 'current', fn ($w) => $w->whereHas('employeeDetail', fn ($d) => $d->whereNotIn('status', ['resigned', 'terminated'])))
             ->when(! in_array($request->query('status', 'current'), ['current', 'all'], true), fn ($w) => $w->whereHas('employeeDetail', fn ($d) => $d->where('status', $request->query('status'))))
             ->when($request->query('store_id'), fn ($w, $s) => $w->whereHas('employeeDetail', fn ($d) => $d->where('store_id', $s)))
             ->when($request->query('department_id'), fn ($w, $s) => $w->whereHas('employeeDetail', fn ($d) => $d->where('department_id', $s)))
-            ->orderBy('name')->paginate($this->perPage($request, 30))->withQueryString();
-
-        return Inertia::render('hr/Employees', ['employees' => $employees, 'filters' => $request->only(['q', 'status', 'store_id', 'department_id']), 'departments' => Department::query()->orderBy('name')->get(['id', 'name'])]);
+            ->orderBy('name')->orderBy('contacts.id');
     }
 
     public function create(Request $request): Response
     {
         $this->allow($request, 'hr.employees.manage');
 
-        return Inertia::render('hr/EmployeeForm', ['employee' => null, 'showSensitive' => $request->user()->hasPermission('hr.employees.sensitive')] + $this->formData());
+        return Inertia::render('hr/EmployeeForm', ['employee' => null, 'showSensitive' => $request->user()->hasPermission('hr.employees.sensitive')] + $this->formData($request));
     }
 
-    public function store(Request $request, EmployeeService $employees): RedirectResponse
+    public function store(Request $request, EmployeeService $employees, UserAccountService $accounts): RedirectResponse
     {
-        $employee = $employees->save($request->user(), $this->validated($request));
+        $data = $this->validated($request);
+        [$employee, $secret] = DB::transaction(function () use ($request, $employees, $accounts, $data) {
+            $employee = $employees->save($request->user(), $data);
 
-        return redirect()->route('hr.employees.show', $employee)->with('success', "{$employee->name} added.");
+            return [$employee, $this->createLoginIfAsked($request, $accounts, $employee, $data)];
+        });
+
+        return redirect()->route('hr.employees.show', $employee)->with('success', "{$employee->name} added.")->with('secret', $secret);
     }
 
     public function show(Request $request, Contact $employee): Response
@@ -74,12 +94,25 @@ class EmployeeController extends Controller
             $employee->employeeDetail->makeHidden(self::SENSITIVE);
         }
         $employee->employeeDetail?->makeHidden(['cnic_hash']);
+        $lifecycle = $user->hasPermission('hr.employees.lifecycle');
+        if (! $lifecycle) {
+            $employee->employeeDetail?->makeHidden(['employer_insights', 'insights_by', 'insights_at']);
+        }
         $canPayroll = $user->hasPermission('hr.payroll.view');
         $year = now()->year;
 
         return Inertia::render('hr/EmployeeShow', [
+            'pager' => Pager::for($request, 'hr.employees', $employee->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('hr.employees.show', $id)),
             'employee' => $employee,
-            'events' => EmployeeLifecycleEvent::query()->where('contact_id', $employee->id)->with('recorder:id,name')->latest('effective_date')->get(),
+            'events' => EmployeeLifecycleEvent::query()->where('contact_id', $employee->id)->with('recorder:id,name')->latest('effective_date')->get()->map(function ($event) use ($lifecycle) {
+                $details = $event->details;
+                if (! $lifecycle && isset($details['previous_period']['employer_insights'])) {
+                    unset($details['previous_period']['employer_insights']);
+                    $event->details = $details;
+                }
+
+                return $event;
+            }),
             'documents' => $sensitive ? EmployeeDocument::query()->where('contact_id', $employee->id)->with('uploader:id,name')->latest()->get(['id', 'contact_id', 'type', 'title', 'expires_on', 'uploaded_by', 'created_at']) : null,
             'attendance' => AttendanceRecord::query()->where('contact_id', $employee->id)->where('work_date', '>=', now()->subDays(31)->toDateString())->orderByDesc('work_date')->get(),
             'leave' => LeaveRequest::query()->where('contact_id', $employee->id)->with('leaveType:id,name')->latest('start_date')->limit(20)->get(),
@@ -88,37 +121,66 @@ class EmployeeController extends Controller
             'salary' => $canPayroll ? SalaryStructure::query()->where('contact_id', $employee->id)->latest('effective_from')->get() : null,
             'advances' => $canPayroll ? EmployeeAdvance::query()->where('contact_id', $employee->id)->latest('id')->get() : null,
             'logins' => $user->hasPermission('settings.users.manage') ? User::query()->inCurrentCompany()->whereDoesntHave('employee')->orderBy('name')->get(['id', 'name', 'email']) : null,
-            'can' => ['manage' => $user->hasPermission('hr.employees.manage'), 'lifecycle' => $user->hasPermission('hr.employees.lifecycle'), 'sensitive' => $sensitive, 'payroll' => $user->hasPermission('hr.payroll.manage'), 'users' => $user->hasPermission('settings.users.manage')],
+            'can' => ['manage' => $user->hasPermission('hr.employees.manage'), 'lifecycle' => $lifecycle, 'export' => $lifecycle && $user->hasPermission('hr.attendance.view'), 'sensitive' => $sensitive, 'payroll' => $user->hasPermission('hr.payroll.manage'), 'users' => $user->hasPermission('settings.users.manage')],
         ]);
     }
 
     public function edit(Request $request, Contact $employee): Response
     {
         $this->allow($request, 'hr.employees.manage');
-        $employee->load('employeeDetail');
+        $employee->load('employeeDetail', 'user:id,email');
+        $employee->employeeDetail?->makeHidden(['employer_insights', 'insights_by', 'insights_at']);
         $sensitive = $request->user()->hasPermission('hr.employees.sensitive');
         if (! $sensitive) {
             $employee->employeeDetail?->makeHidden(self::SENSITIVE);
         }
 
-        return Inertia::render('hr/EmployeeForm', ['employee' => $employee, 'showSensitive' => $sensitive] + $this->formData());
+        return Inertia::render('hr/EmployeeForm', ['employee' => $employee, 'showSensitive' => $sensitive, 'hasLogin' => $employee->user?->email] + $this->formData($request, $employee));
     }
 
-    public function update(Request $request, Contact $employee, EmployeeService $employees): RedirectResponse
+    public function update(Request $request, Contact $employee, EmployeeService $employees, UserAccountService $accounts): RedirectResponse
     {
-        $employees->save($request->user(), $this->validated($request), $employee);
+        $data = $this->validated($request);
+        $secret = DB::transaction(function () use ($request, $employees, $accounts, $employee, $data) {
+            $employees->save($request->user(), $data, $employee);
 
-        return redirect()->route('hr.employees.show', $employee)->with('success', 'Saved.');
+            return $this->createLoginIfAsked($request, $accounts, $employee->fresh(['employeeDetail', 'user']), $data);
+        });
+
+        return redirect()->route('hr.employees.show', $employee)->with('success', 'Saved.')->with('secret', $secret);
     }
 
     public function transition(Request $request, Contact $employee, EmployeeService $employees): RedirectResponse
     {
-        $data = $request->validate(['action' => ['required', 'in:confirm,start_probation,suspend,reinstate,resign,terminate,transfer'], 'effective_date' => ['required', 'date'], 'note' => ['nullable', 'string', 'max:500'], 'store_id' => ['nullable', 'integer'], 'department_id' => ['nullable', 'integer'], 'job_position_id' => ['nullable', 'integer']]);
+        $data = $request->validate(['action' => ['required', 'in:confirm,start_probation,suspend,reinstate,resign,terminate,transfer,rehire'], 'effective_date' => ['required', 'date'], 'note' => ['nullable', 'string', 'max:500'], 'insights' => ['nullable', 'string', 'max:5000'], 'store_id' => ['nullable', 'integer'], 'department_id' => ['nullable', 'integer'], 'job_position_id' => ['nullable', 'integer']]);
         $data['action'] === 'transfer'
             ? $employees->transfer($request->user(), $employee, $data['store_id'] ?? null, $data['department_id'] ?? null, $data['job_position_id'] ?? null, $data['effective_date'], $data['note'] ?? null)
-            : $employees->transition($request->user(), $employee, $data['action'], $data['effective_date'], $data['note'] ?? null);
+            : $employees->transition($request->user(), $employee, $data['action'], $data['effective_date'], $data['note'] ?? null, $data['insights'] ?? null);
 
         return back()->with('success', 'Employment record updated.');
+    }
+
+    /** The leaving record: ?format=xlsx downloads an Excel file, ?format=print opens a page to print or save as PDF. */
+    public function export(Request $request, Contact $employee, EmployeeExportService $exports): \Symfony\Component\HttpFoundation\Response
+    {
+        $this->allow($request, 'hr.employees.lifecycle');
+        abort_unless($employee->type === 'employee', 404);
+        $data = $exports->build($request->user(), $employee);
+        $name = 'employee-record-'.\Illuminate\Support\Str::slug($employee->name ?: 'employee').'-'.$data['period']['to'];
+        if ($request->query('format') === 'print') {
+            return response()->view('hr.employee-export', ['data' => $data])->header('Cache-Control', 'no-store');
+        }
+        $path = $exports->toXlsx($data);
+
+        return response()->download($path, $name.'.xlsx', ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cache-Control' => 'no-store'])->deleteFileAfterSend(true);
+    }
+
+    public function insights(Request $request, Contact $employee, EmployeeService $employees): RedirectResponse
+    {
+        $data = $request->validate(['insights' => ['nullable', 'string', 'max:5000']]);
+        $employees->saveInsights($request->user(), $employee, $data['insights'] ?? null);
+
+        return back()->with('success', 'Employer insights saved.');
     }
 
     public function salary(Request $request, Contact $employee): RedirectResponse
@@ -168,13 +230,53 @@ class EmployeeController extends Controller
     }
 
     /** @return array<string, mixed> */
-    private function formData(): array
+    private function formData(Request $request, ?Contact $employee = null): array
     {
+        $user = $request->user();
+        $canLogin = $user->hasPermission('settings.users.manage') && ! $employee?->user;
+        $accounts = app(UserAccountService::class);
+
         return [
             'departments' => Department::query()->orderBy('name')->get(['id', 'name']),
             'positions' => JobPosition::query()->orderBy('name')->get(['id', 'name', 'department_id']),
             'managers' => Contact::query()->employees()->where('is_active', true)->orderBy('name')->get(['id', 'name']),
+            'canCreateLogin' => $canLogin,
+            // Only roles this person is allowed to hand out; the server checks again when saving.
+            'loginRoles' => $canLogin ? Role::query()->with('permissions')->orderBy('name')->get()->filter(fn (Role $r) => $accounts->canGrant($user, $r))->map(fn (Role $r) => ['id' => $r->id, 'name' => $r->name, 'description' => $r->description])->values() : [],
+            'minPasswordLength' => (int) \App\Support\Settings\Settings::get('security.password_min_length'),
         ];
+    }
+
+    /**
+     * "Also give this employee a login": creates the account, links it, gives the chosen role for the employee's
+     * store and returns the temporary password to show once (null when no login was asked for).
+     *
+     * @param  array<string, mixed>  $data
+     * @return array{label: string, value: string, note: string}|null
+     */
+    private function createLoginIfAsked(Request $request, UserAccountService $accounts, Contact $employee, array $data): ?array
+    {
+        if (! $request->boolean('create_login') || $employee->user) {
+            return null;
+        }
+        $request->validate([
+            'login_role_id' => ['required', 'integer'],
+            'login_password' => ['nullable', 'string', 'max:100', Password::min(max(8, (int) \App\Support\Settings\Settings::get('security.password_min_length')))->letters()->numbers()],
+        ], [], ['login_role_id' => 'role', 'login_password' => 'temporary password']);
+        if (empty($data['email'])) {
+            throw \Illuminate\Validation\ValidationException::withMessages(['email' => 'Enter an e-mail address: it is what the employee signs in with.']);
+        }
+        $storeId = $data['store_id'] ?? $employee->employeeDetail?->store_id;
+        if (! $storeId) {
+            throw \Illuminate\Validation\ValidationException::withMessages(['store_id' => 'Choose the employee\'s store first: their role applies to that store.']);
+        }
+        $result = $accounts->create(
+            $request->user(),
+            ['name' => $employee->name, 'email' => $data['email'], 'employee_id' => $employee->id, 'temporary_password' => $request->input('login_password') ?: null],
+            [['role_id' => (int) $request->input('login_role_id'), 'store_id' => (int) $storeId]],
+        );
+
+        return ['label' => 'Temporary password for '.$result['user']->email, 'value' => $result['temporary_password'], 'note' => 'Give this to the employee directly. It is shown only once and must be changed at first sign-in.'];
     }
 
     /** @return array<string, mixed> */
@@ -187,7 +289,7 @@ class EmployeeController extends Controller
             'joining_date' => ['required', 'date'], 'probation_end_date' => ['nullable', 'date', 'after_or_equal:joining_date'], 'gender' => ['nullable', 'in:male,female,other'], 'marital_status' => ['nullable', 'in:single,married,widowed,divorced'],
             'emergency_contact_name' => ['nullable', 'string', 'max:120'], 'emergency_contact_phone' => ['nullable', 'string', 'max:30'], 'emergency_contact_relation' => ['nullable', 'string', 'max:60'], 'education_level' => ['nullable', 'string', 'max:80'], 'note' => ['nullable', 'string', 'max:2000'],
             'cnic' => ['nullable', 'string', 'max:20'], 'cnic_expiry' => ['nullable', 'date'], 'bank_name' => ['nullable', 'string', 'max:80'], 'bank_account' => ['nullable', 'string', 'max:40'], 'date_of_birth' => ['nullable', 'date', 'before:today'],
-            'father_name' => ['nullable', 'string', 'max:120'], 'private_address' => ['nullable', 'string', 'max:500'], 'eobi_no' => ['nullable', 'string', 'max:40'], 'social_security_no' => ['nullable', 'string', 'max:40'],
+            'father_name' => ['nullable', 'string', 'max:120'], 'create_login' => ['boolean'], 'private_address' => ['nullable', 'string', 'max:500'], 'eobi_no' => ['nullable', 'string', 'max:40'], 'social_security_no' => ['nullable', 'string', 'max:40'],
         ]);
 
         // Sensitive fields are only changed when the user may, and only those the form sent.

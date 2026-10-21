@@ -11,6 +11,7 @@ use App\Models\PayrollAdjustment;
 use App\Models\PayrollRun;
 use App\Models\Payslip;
 use App\Models\Shift;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -24,10 +25,16 @@ class PayrollController extends Controller
         $this->allow($request, 'hr.payroll.view');
 
         return Inertia::render('hr/Payroll', [
-            'runs' => PayrollRun::query()->with('store:id,name', 'creator:id,name', 'approver:id,name')->withCount('payslips')->latest('period_start')->paginate(24),
+            'runs' => $this->listQuery($request)->with('store:id,name', 'creator:id,name', 'approver:id,name')->withCount('payslips')->paginate(24),
             'adjustments' => PayrollAdjustment::query()->with('contact:id,name', 'requester:id,name')->whereIn('status', ['pending', 'approved'])->latest()->limit(100)->get(),
             'can' => ['manage' => $request->user()->hasPermission('hr.payroll.manage'), 'approve' => $request->user()->hasPermission('hr.payroll.approve')],
         ]);
+    }
+
+    /** The payroll runs list (newest month first). The next / previous arrows on a run walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        return PayrollRun::query()->latest('period_start')->latest('id');
     }
 
     public function prepare(Request $request, PayrollService $payroll): RedirectResponse
@@ -43,6 +50,7 @@ class PayrollController extends Controller
         $this->allow($request, 'hr.payroll.view');
 
         return Inertia::render('hr/PayrollShow', [
+            'pager' => Pager::for($request, 'hr.payroll', $run->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('hr.payroll.show', $id)),
             'run' => $run->load('store:id,name', 'creator:id,name', 'approver:id,name'),
             'payslips' => Payslip::query()->where('payroll_run_id', $run->id)->with('contact:id,name', 'lines', 'paymentMethod:id,name')->orderBy('id')->get(),
             'can' => ['approve' => $request->user()->hasPermission('hr.payroll.approve')],

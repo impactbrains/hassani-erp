@@ -6,6 +6,7 @@ use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 /**
  * A product as customers know it ("Tapal Family Mixture"). Sellable SKUs are its variants.
@@ -13,6 +14,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Product extends Model
 {
     use BelongsToCompany;
+    use SoftDeletes;
 
     protected $guarded = ['id', 'company_id'];
 
@@ -21,6 +23,7 @@ class Product extends Model
         'track_expiry' => 'boolean',
         'is_online' => 'boolean',
         'is_active' => 'boolean',
+        'deleted_at' => 'datetime',
     ];
 
     public function category(): BelongsTo

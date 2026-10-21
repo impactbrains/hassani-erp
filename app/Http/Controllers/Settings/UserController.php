@@ -3,12 +3,14 @@
 namespace App\Http\Controllers\Settings;
 
 use App\Domain\Identity\UserAccountService;
+use App\Domain\Identity\UserPermissionService;
 use App\Http\Controllers\Controller;
 use App\Models\Contact;
 use App\Models\LoginEvent;
 use App\Models\Role;
 use App\Models\Store;
 use App\Models\User;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -25,16 +27,24 @@ class UserController extends Controller
     public function index(Request $request): Response
     {
         $this->allow($request, 'settings.users.view');
-        $q = trim((string) $request->query('q'));
+        Pager::remember($request, 'settings.users');
 
         return Inertia::render('settings/Users', [
-            'users' => User::query()->inCurrentCompany()->with(['roleAssignments.role:id,name,is_owner', 'roleAssignments.store:id,name', 'employee:id,user_id,name'])
-                ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('name', 'ilike', "%{$q}%")->orWhere('email', 'ilike', "%{$q}%")))
-                ->when($request->query('status'), fn ($w, $s) => $w->where('status', $s))
-                ->orderBy('name')->paginate(50)->withQueryString(),
+            'users' => $this->listQuery($request)->with(['roleAssignments.role:id,name,is_owner', 'roleAssignments.store:id,name', 'employee:id,user_id,name'])->paginate(50)->withQueryString(),
             'filters' => $request->only(['q', 'status']),
             'canManage' => $request->user()->hasPermission('settings.users.manage'),
         ]);
+    }
+
+    /** The users list as filtered on screen. The next / previous arrows on a user walk through this same list. */
+    private function listQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        $q = trim((string) $request->query('q'));
+
+        return User::query()->inCurrentCompany()
+            ->when($q !== '', fn ($w) => $w->where(fn ($x) => $x->where('name', 'ilike', "%{$q}%")->orWhere('email', 'ilike', "%{$q}%")))
+            ->when($request->query('status'), fn ($w, $s) => $w->where('status', $s))
+            ->orderBy('name')->orderBy('id');
     }
 
     public function create(Request $request): Response
@@ -52,16 +62,20 @@ class UserController extends Controller
         return redirect()->route('settings.users.show', $result['user'])->with('secret', ['label' => 'Temporary password for '.$result['user']->email, 'value' => $result['temporary_password'], 'note' => 'Give this to the person directly. It is shown only once and must be changed at first sign-in.']);
     }
 
-    public function show(Request $request, User $user, \App\Domain\Identity\RoleService $roles): Response
+    public function show(Request $request, User $user, \App\Domain\Identity\RoleService $roles, UserPermissionService $permissions): Response
     {
         $this->allow($request, 'settings.users.view');
         abort_unless($user->company_id === $request->user()->company_id, 404);
 
         return Inertia::render('settings/UserShow', [
+            'pager' => Pager::for($request, 'settings.users', $user->id, fn (Request $r) => $this->listQuery($r), fn (int $id) => route('settings.users.show', $id)),
             'account' => $user->load('roleAssignments.role:id,name,is_owner', 'roleAssignments.store:id,name', 'roleAssignments.granter:id,name', 'employee:id,user_id,name')->only(['id', 'name', 'email', 'status', 'locale', 'last_login_at', 'last_activity_at', 'deactivated_at', 'must_change_password', 'two_factor_confirmed_at', 'roleAssignments', 'employee']) + ['has_pin' => $user->pin_hash !== null],
             'effective' => collect($user->roleAssignments)->map(fn ($a) => $a->role)->filter()->unique('id')->mapWithKeys(fn ($r) => [$r->name => $roles->summary($r)]),
             'sessions' => DB::table('sessions')->where('user_id', $user->id)->orderByDesc('last_activity')->get(['id', 'ip_address', 'user_agent', 'last_activity']),
             'logins' => LoginEvent::query()->where('user_id', $user->id)->latest('id')->limit(20)->get(['event', 'ip_address', 'user_agent', 'created_at']),
+            'permissionRows' => $user->isOwner() ? [] : $permissions->breakdown($request->user(), $user),
+            'isOwnerAccount' => $user->isOwner(),
+            'canPermissions' => $request->user()->hasPermission('settings.users.permissions') && $request->user()->id !== $user->id && ! $user->isOwner(),
             'canManage' => $request->user()->hasPermission('settings.users.manage'),
             'isSelf' => $request->user()->id === $user->id,
         ] + $this->formData());
@@ -78,6 +92,26 @@ class UserController extends Controller
         }
 
         return back()->with('success', 'Saved.');
+    }
+
+    /** Give or take away one permission for this person (for every store or one store). */
+    public function setPermission(Request $request, User $user, UserPermissionService $permissions): RedirectResponse
+    {
+        $data = $request->validate(['permission' => ['required', 'string', 'max:80'], 'effect' => ['required', 'in:grant,revoke'], 'store_id' => ['nullable', 'integer'], 'reason' => ['nullable', 'string', 'max:200']]);
+        abort_unless($user->company_id === $request->user()->company_id, 404);
+        $permissions->set($request->user(), $user, $data['permission'], $data['effect'], $data['store_id'] ?? null, $data['reason'] ?? null);
+
+        return back()->with('success', $data['effect'] === 'grant' ? 'Permission given.' : 'Permission taken away.');
+    }
+
+    /** Back to the role default, for one permission or for all of them. */
+    public function resetPermission(Request $request, User $user, UserPermissionService $permissions): RedirectResponse
+    {
+        $data = $request->validate(['permission' => ['nullable', 'string', 'max:80']]);
+        abort_unless($user->company_id === $request->user()->company_id, 404);
+        $permissions->reset($request->user(), $user, $data['permission'] ?? null);
+
+        return back()->with('success', 'Back to the role default.');
     }
 
     public function action(Request $request, User $user, UserAccountService $accounts): RedirectResponse

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Head, Link, router, usePage } from '@inertiajs/vue3';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { ArrowLeft, Banknote, Camera, PackagePlus, ClipboardList, Lock, Minus, PauseCircle, Percent, Plus, Printer, Receipt, ScanLine, Trash2, UserRound, X } from 'lucide-vue-next';
+import { ArrowLeft, Banknote, Camera, Check, PackagePlus, ClipboardList, Languages, Lock, Minus, PauseCircle, Percent, Plus, Printer, Receipt, ScanLine, Trash2, UserRound, X } from 'lucide-vue-next';
 import Button from '@/components/ui/Button.vue';
 import Modal from '@/components/ui/Modal.vue';
 import Badge from '@/components/ui/Badge.vue';
@@ -12,22 +12,26 @@ import DenominationCount from '@/components/pos/DenominationCount.vue';
 import PaymentDialog from '@/components/pos/PaymentDialog.vue';
 import ReceiptView from '@/components/pos/ReceiptView.vue';
 import ShiftReportView from '@/components/pos/ShiftReportView.vue';
-import { ApiError, del, get, post, uuid } from '@/lib/http';
-import { dateTime, money, qty, round2 } from '@/lib/format';
-import { localName, t } from '@/lib/i18n';
+import { ApiError, api, del, get, post, uuid } from '@/lib/http';
+import { installScanner, type Scanner } from '@/lib/scanner';
+import { qtyStep, roundQty, stepOnArrow } from '@/lib/stepper';
+import { appTimezone, dateTime, money, qty, round2 } from '@/lib/format';
+import { currentLocale, localName, switchLocale, t } from '@/lib/i18n';
+import { hintText, tagText } from '@/lib/priceRules';
 
 /**
- * The POS screen. Scanner first: a handheld USB scanner types the barcode
- * plus Enter into the search box, which is always focused. The browser
- * keeps a proposed cart; the server re-prices it (quote) and posts the sale.
+ * The POS screen. Scanner first: a USB or Bluetooth scanner works wherever the cursor is
+ * (lib/scanner.ts tells a scan from typing by its speed) and adds the item at once, with no
+ * search list. The browser keeps a proposed cart; the server re-prices it (quote) and posts the sale.
  *
- * Several carts can be open at once, one tab per customer. Switching tabs
- * keeps every cart exactly as it was (no hold / resume needed).
+ * Several carts can be open at once, one tab per customer (up to 10). Switching tabs keeps every
+ * cart exactly as it was (no hold / resume needed). The tabs are saved on the server a moment after
+ * every change, so a refresh returns to the same terminal, shift and carts.
  *
  * Keys: F2 search · F3 new cart · F4 customer · F6 discount · F7/F8 previous/next cart
  *       · Alt+1..9 jump to a cart · F9 pay · Esc close.
  */
-const props = defineProps<{ store: any; registers: any[]; shift: any | null; paymentMethods: any[]; reasons: Record<string, any[]>; settings: any; can: Record<string, boolean>; unlistedItem: any }>();
+const props = defineProps<{ workspace: { state: any; version: number } | null; maxTabs: number; store: any; registers: any[]; shift: any | null; paymentMethods: any[]; reasons: Record<string, any[]>; settings: any; can: Record<string, boolean>; unlistedItem: any }>();
 const page = usePage<any>();
 
 interface Line { description?: string; barcode?: string | null; unlisted?: boolean; key: string; variant_id: number; name: string; name_ur: string | null; sku: string; units: any[]; variant_unit_id: number; quantity: string; unit_price: string | null; price_token: string | null; discount: { type: 'amount' | 'percent'; value: string } | null; available: string }
@@ -56,8 +60,19 @@ const activeId = ref('');
 function makeCart(number: number): Cart {
     return { id: uuid(), number, lines: [], removed: [], selected: -1, customer: null, cartDiscount: null, quote: null, quoteError: null, tokens: {}, idempotencyKey: uuid(), quoteSeq: 0 };
 }
-carts.value = [makeCart(1)];
-activeId.value = carts.value[0].id;
+/** Rebuilds the tabs saved on the server. Prices are quoted again and approval tokens are gone, on purpose. */
+function restoreCarts(state: any): Cart[] {
+    return ((state?.carts ?? []) as any[]).map((c) => ({
+        id: String(c.id), number: Number(c.number) || 1,
+        lines: ((c.lines ?? []) as Line[]).map((l) => ({ ...l, price_token: null })),
+        removed: c.removed ?? [], selected: (c.lines?.length ?? 0) > 0 ? 0 : -1, customer: c.customer ?? null, cartDiscount: c.cartDiscount ?? null,
+        quote: null, quoteError: null, tokens: {}, idempotencyKey: c.idempotencyKey || uuid(), quoteSeq: 0,
+    }));
+}
+const restored = restoreCarts(props.workspace?.state);
+carts.value = restored.length ? restored : [makeCart(1)];
+activeId.value = restored.some((c) => c.id === props.workspace?.state?.active_id) ? props.workspace!.state.active_id : carts.value[0].id;
+let workspaceVersion: number | null = props.workspace?.version ?? null;
 const activeCart = computed<Cart>(() => carts.value.find((c) => c.id === activeId.value) ?? carts.value[0]);
 
 // The rest of the screen works on "the current cart". These point at the active tab, so
@@ -131,9 +146,7 @@ function openBlankTab() {
 }
 function addTab() {
     if (modal.value || busy.value || pickerDialog.value) return;
-    // An untouched empty cart is already a "new cart": go to it instead of piling up blank tabs.
-    const blank = carts.value.find(cartIsEmpty);
-    if (blank) return switchTab(blank.id);
+    if (carts.value.length >= props.maxTabs) return notify('error', t('You can have up to :n carts open. Finish or close one first.', { n: props.maxTabs }));
     openBlankTab();
 }
 function switchTab(id: string) {
@@ -216,9 +229,12 @@ async function joinShift() {
 }
 
 // ---------- searching & scanning ----------
+let scanner: Scanner | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 watch(search, (value) => {
     clearTimeout(searchTimer);
+    // The keys of a scan arrive in a rush: no search list for them (the scan itself adds the item).
+    if (scanner?.isBursting()) { results.value = []; return; }
     if (value.trim().length < 2) { results.value = []; return; }
     searchTimer = setTimeout(() => runSearch(value, false), 180);
 });
@@ -246,7 +262,7 @@ function onSearchEnter() {
     runSearch(term, true);
 }
 
-function add(product: any, quantity = 1) {
+function add(product: any, quantity = 1, quiet = false) {
     const unitId = product.scanned_unit_id ?? product.units.find((u: any) => u.is_default)?.id ?? product.units[0]?.id;
     if (!unitId) return notify('error', t('This product has no pack size that can be sold.'));
     const existing = lines.value.findIndex((l) => l.variant_id === product.variant_id && l.variant_unit_id === unitId && !l.unit_price);
@@ -257,15 +273,60 @@ function add(product: any, quantity = 1) {
         lines.value.push({ key: uuid(), variant_id: product.variant_id, name: product.name, name_ur: product.name_ur, sku: product.sku, units: product.units, variant_unit_id: unitId, quantity: String(quantity), unit_price: null, price_token: null, discount: null, available: product.available });
         selected.value = lines.value.length - 1;
     }
-    if (Number(product.available) <= 0 && product.type === 'stocked') notify('error', t(':name shows no stock. Check the shelf, or the sale will be stopped.', { name: product.name }));
+    if (!quiet && Number(product.available) <= 0 && product.type === 'stocked') notify('error', t(':name shows no stock. Check the shelf, or the sale will be stopped.', { name: product.name }));
     focusSearch();
 }
 
-function changeQty(i: number, delta: number) {
+/** One step of quantity: 1, or 0.125 for units that allow fractions (kg ...). `direction` is +1 or -1. */
+const stepFor = (l: Line) => qtyStep(units(l)?.allows_fraction);
+function changeQty(i: number, direction: number) {
     const l = lines.value[i];
-    const next = round2(Number(l.quantity) + delta);
+    const next = roundQty(Number(l.quantity) + direction * stepFor(l));
     if (next <= 0) return removeLine(i);
     l.quantity = String(next);
+}
+function onQtyKey(e: KeyboardEvent, l: Line) {
+    const next = stepOnArrow(e, l.quantity, stepFor(l), stepFor(l));
+    if (next !== null) l.quantity = next;
+}
+function onMoneyKey(e: KeyboardEvent, current: string, apply: (v: string) => void) {
+    const next = stepOnArrow(e, current, 1, 0);
+    if (next !== null) apply(next);
+}
+
+// ---------- one scan (keyboard scanner or camera) ----------
+const cameraNotice = ref<{ kind: 'added' | 'nostock' | 'missing'; text: string } | null>(null);
+let cameraNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+function showCameraNotice(kind: 'added' | 'nostock' | 'missing', text: string) {
+    cameraNotice.value = { kind, text };
+    clearTimeout(cameraNoticeTimer);
+    cameraNoticeTimer = setTimeout(() => (cameraNotice.value = null), 4000);
+}
+/** Exact match only: a product barcode adds the item, a receipt or order number opens that document. */
+async function handleScan(code: string, source: 'keyboard' | 'camera') {
+    if (!shift.value) return;
+    try {
+        const res = await post(route('pos.scan'), { code, customer_id: customer.value?.id ?? null });
+        if (res.type === 'product') {
+            const p = res.product;
+            const noStock = p.type === 'stocked' && Number(p.available) <= 0;
+            add(p, 1, source === 'camera');
+            if (source === 'camera') showCameraNotice(noStock ? 'nostock' : 'added', noStock ? t('No stock: :name was added but cannot be sold (shown in red).', { name: p.name }) : t('Added: :name', { name: p.name }));
+        } else if (res.type === 'receipt') {
+            if (source === 'camera') stopCamera();
+            await reprint(res.id, false);
+        } else if (res.type === 'order') {
+            if (source === 'camera') stopCamera();
+            await saveNow(); // the carts wait on the server while the order is open
+            router.visit(res.url);
+        } else if (source === 'camera') {
+            showCameraNotice('missing', t('No product with code :code.', { code }));
+        } else {
+            openUnlisted(code);
+        }
+    } catch (e) {
+        notify('error', (e as Error).message);
+    }
 }
 function removeLine(i: number) {
     const [l] = lines.value.splice(i, 1);
@@ -296,17 +357,79 @@ function addUnlisted() {
     focusSearch();
 }
 
+// ---------- saving the tabs on the server ----------
+// Rule for two screens: a save carries the version this screen last saw. If another screen saved in
+// between, nothing is overwritten: the banner offers "Load those carts" or "Keep mine".
+const conflict = ref<{ version: number; state: any } | null>(null);
+const saveFailed = ref(false);
+let dirty = false;
+let saving = false;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+function snapshot() {
+    return {
+        active_id: activeId.value,
+        carts: carts.value.map((c) => ({
+            id: c.id, number: c.number, customer: c.customer, cartDiscount: c.cartDiscount, idempotencyKey: c.idempotencyKey, removed: c.removed,
+            lines: c.lines.map((l) => ({ ...l, price_token: null })),
+        })),
+    };
+}
+let lastQueued = JSON.stringify(snapshot());
+function queueSave() {
+    const text = JSON.stringify(snapshot());
+    if (text === lastQueued) return; // a new price quote changes the cart object but not what is saved
+    lastQueued = text;
+    dirty = true;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveNow(), 700);
+}
+async function saveNow(force = false) {
+    clearTimeout(saveTimer);
+    if (saving) { saveTimer = setTimeout(() => saveNow(force), 400); return; }
+    if (conflict.value && !force) return;
+    saving = true;
+    const text = JSON.stringify(snapshot());
+    try {
+        const res = await api('PUT', route('pos.workspace.save'), { state: JSON.parse(text), base_version: workspaceVersion, register_id: shift.value?.register_id ?? null, force });
+        workspaceVersion = res.version;
+        conflict.value = null;
+        saveFailed.value = false;
+        dirty = JSON.stringify(snapshot()) !== text;
+        if (dirty) saveTimer = setTimeout(() => saveNow(), 300);
+    } catch (e) {
+        if (e instanceof ApiError && e.code === 'workspace_conflict') conflict.value = { version: e.details.version, state: e.details.state };
+        else { saveFailed.value = true; saveTimer = setTimeout(() => saveNow(), 5000); }
+    } finally {
+        saving = false;
+    }
+}
+function loadOtherCarts() {
+    if (!conflict.value) return;
+    const next = restoreCarts(conflict.value.state);
+    carts.value = next.length ? next : [makeCart(1)];
+    activeId.value = next.some((c) => c.id === conflict.value!.state?.active_id) ? conflict.value.state.active_id : carts.value[0].id;
+    workspaceVersion = conflict.value.version;
+    conflict.value = null;
+    lastQueued = JSON.stringify(snapshot());
+    dirty = false;
+    carts.value.forEach((c) => c.lines.length && refreshQuote(c));
+}
+function keepMyCarts() {
+    if (conflict.value) workspaceVersion = conflict.value.version;
+    saveNow(true);
+}
+watch([carts, activeId], queueSave, { deep: true });
+
 // ---------- server pricing ----------
 let quoteTimer: ReturnType<typeof setTimeout> | undefined;
 watch([lines, cartDiscount, customer], () => {
     clearTimeout(quoteTimer);
     if (!lines.value.length) { quote.value = null; quoteError.value = null; return; }
-    quoteTimer = setTimeout(refreshQuote, 220);
+    quoteTimer = setTimeout(() => refreshQuote(), 220);
 }, { deep: true });
 
-async function refreshQuote() {
+async function refreshQuote(cart: Cart = activeCart.value) {
     // Remember which cart this answer is for: the cashier may switch tabs while the server is thinking.
-    const cart = activeCart.value;
     const seq = ++cart.quoteSeq;
     try {
         const result = await post(route('pos.quote'), buildPayload(cart, false));
@@ -385,6 +508,9 @@ async function pay(payments: any[]) {
             }
         } else if (e instanceof ApiError && e.code === 'total_changed') {
             await refreshQuote();
+        } else if (e instanceof ApiError && e.code === 'insufficient_stock' && e.details?.shortages) {
+            // Stock changed since the quote: show every short item in the Pay dialog and on the cart lines.
+            if (cart.quote) cart.quote = { ...cart.quote, shortages: e.details.shortages };
         }
         payError.value = (e as Error).message;
     } finally {
@@ -458,12 +584,23 @@ function saveDiscount() {
 // New carts no longer need holding (use a tab). This list only lets the cashier pick up carts
 // that were held before, each one opening in its own tab.
 const heldCarts = ref<any[]>([]);
+const heldCount = ref(0); // the "Held carts" button only shows while something is still on hold
+async function refreshHeldCount() {
+    if (!props.can.hold) return;
+    try {
+        heldCount.value = (await get(route('pos.held'))).length;
+    } catch {
+        heldCount.value = 0;
+    }
+}
 async function showHeld() {
     heldCarts.value = await get(route('pos.held'));
+    heldCount.value = heldCarts.value.length;
     modal.value = 'held';
 }
 async function resume(id: number) {
     try {
+        if (!cartIsEmpty(activeCart.value) && carts.value.length >= props.maxTabs) return notify('error', t('You can have up to :n carts open. Finish or close one first.', { n: props.maxTabs }));
         const res = await post(route('pos.resume', id));
         // Open it in its own tab (re-use the current one if it is still empty).
         if (!cartIsEmpty(activeCart.value)) openBlankTab();
@@ -471,6 +608,7 @@ async function resume(id: number) {
         cartDiscount.value = res.cart.cartDiscount ?? null;
         customer.value = res.cart.customer ?? null;
         lines.value.forEach((l) => (l.price_token = null));
+        heldCount.value = Math.max(0, heldCount.value - 1);
         focusSearch();
     } catch (e) {
         notify('error', (e as Error).message);
@@ -479,6 +617,7 @@ async function resume(id: number) {
 async function discard(id: number) {
     await del(route('pos.discard', id));
     heldCarts.value = heldCarts.value.filter((c) => c.id !== id);
+    heldCount.value = heldCarts.value.length;
 }
 
 // ---------- receipts (reprint / return) ----------
@@ -488,11 +627,13 @@ async function showRecent() {
     recent.value = await get(route('pos.recent', { q: recentQ.value }));
     modal.value = 'recent';
 }
-async function reprint(id: number) {
+const receiptInvoiceId = ref<number | null>(null);
+async function reprint(id: number, print = true) {
     receipt.value = await get(route('pos.receipt', id));
+    receiptInvoiceId.value = id;
     receiptKind.value = 'reprint';
     modal.value = 'receipt';
-    nextTick(() => printReceipt());
+    if (print) nextTick(() => printReceipt());
 }
 
 // ---------- cash in/out, X and Z ----------
@@ -535,20 +676,53 @@ async function closeShift() {
 
 // ---------- camera scanning (fallback when no handheld scanner) ----------
 let camera: any = null;
+let cameraRun = 0;
+let lastCameraCode = { code: '', at: 0 };
 async function startCamera() {
+    const run = ++cameraRun;
+    cameraNotice.value = null;
     modal.value = 'camera';
     await nextTick();
-    const { Html5Qrcode } = await import('html5-qrcode');
-    camera = new Html5Qrcode('camera-reader');
-    await camera.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 260, height: 140 } }, (code: string) => {
+    try {
+        const { Html5Qrcode } = await import('html5-qrcode');
+        if (run !== cameraRun || modal.value !== 'camera') return; // closed while it was loading
+        camera = new Html5Qrcode('camera-reader');
+        // The camera stays open: scan item after item. The same code seen again within 2 seconds is the same item.
+        await camera.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 260, height: 140 } }, (code: string) => {
+            const now = Date.now();
+            if (code === lastCameraCode.code && now - lastCameraCode.at < 2000) return;
+            lastCameraCode = { code, at: now };
+            handleScan(code, 'camera');
+        }, () => undefined);
+    } catch (e) {
+        // Blocked ("Never allow"), no camera, or in use: close the dialog so the cashier is never stuck.
+        const blocked = /NotAllowed|Permission|denied/i.test(String(e));
         stopCamera();
-        runSearch(code, true);
-    }).catch(() => notify('error', t('The camera could not be opened.')));
+        notify('error', blocked ? t('Camera access is blocked. Allow the camera for this site in the browser settings (the lock icon next to the address), then try again.') : t('The camera could not be opened.'));
+    }
 }
 function stopCamera() {
-    camera?.stop?.().catch(() => null);
+    cameraRun++;
+    const c = camera;
     camera = null;
-    if (modal.value === 'camera') modal.value = null;
+    if (modal.value === 'camera') modal.value = null; // close first: nothing below may keep the dialog open
+    try {
+        Promise.resolve(c?.stop?.()).catch(() => null); // throws or rejects when the camera never started
+    } catch {
+        /* camera was not running */
+    }
+    try {
+        c?.clear?.();
+    } catch {
+        /* nothing to clear */
+    }
+    focusSearch();
+}
+
+// ---------- language (flips the whole POS to right-to-left in Urdu) ----------
+const locale = computed(() => currentLocale());
+function toggleLocale() {
+    switchLocale(locale.value === 'ur' ? 'en' : 'ur'); // same switch as the ERP; carts on screen are kept
 }
 
 // ---------- keyboard ----------
@@ -557,6 +731,8 @@ function focusSearch() {
 }
 function onKey(e: KeyboardEvent) {
     if (approval.value || pickerDialog.value) return;
+    // A "-" or "+" inside a scanned code must not change a quantity.
+    if (e.key.length === 1 && scanner?.isBursting()) return;
     if (e.key === 'F2') { e.preventDefault(); focusSearch(); }
     if (e.key === 'F4') { e.preventDefault(); customerPicker.value?.focus(); }
     if (e.key === 'F6' && props.can.discount) { e.preventDefault(); editDiscount(null); }
@@ -582,19 +758,31 @@ function onKey(e: KeyboardEvent) {
 function notify(kind: 'success' | 'error', text: string) {
     toasts.value?.push(kind, text);
 }
+// Carts are saved on the server, so a refresh is safe. The browser only asks while a change has not been saved yet.
 function guardUnload(e: BeforeUnloadEvent) {
-    if (cartHasItems.value) e.preventDefault();
+    if (dirty && !conflict.value) e.preventDefault();
 }
 onMounted(() => {
     window.addEventListener('keydown', onKey);
     window.addEventListener('beforeunload', guardUnload);
+    // USB / Bluetooth scanners work anywhere on the screen. While a dialog is open (Pay included) a scan is thrown away.
+    scanner = installScanner({ onScan: (code) => { if (modal.value || approval.value || pickerDialog.value) return; handleScan(code, 'keyboard'); } });
     focusSearch();
+    if (shift.value) refreshHeldCount();
+    carts.value.forEach((c) => c.lines.length && refreshQuote(c)); // carts that came back from the server get fresh prices
 });
 onBeforeUnmount(() => {
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('beforeunload', guardUnload);
+    scanner?.stop();
+    clearTimeout(cameraNoticeTimer);
+    if (dirty && !conflict.value) saveNow();
     stopCamera();
 });
+
+// A line is red when the stock on hand cannot cover the cart (all lines of the same product are added together).
+const shortages = computed<any[]>(() => quote.value?.shortages ?? []);
+const shortOf = (variantId: number) => shortages.value.find((x) => x.variant_id === variantId);
 
 const clock = ref(new Date());
 const clockTimer = setInterval(() => (clock.value = new Date()), 30000);
@@ -603,23 +791,25 @@ onBeforeUnmount(() => clearInterval(clockTimer));
 
 <template>
     <Head :title="t('POS')" />
-    <div class="no-print flex h-screen flex-col bg-paper">
+    <div class="no-print flex h-screen flex-col bg-paper" :dir="locale === 'ur' ? 'rtl' : 'ltr'">
         <!-- Top bar -->
         <header class="flex h-14 shrink-0 items-center gap-3 bg-ink-900 px-4 text-white">
-            <Link :href="route('dashboard')" class="flex items-center gap-1.5 rounded px-2 py-1.5 text-sm text-ink-200 hover:bg-white/10"><ArrowLeft class="h-4 w-4" />{{ t('Dashboard') }}</Link>
+            <Link :href="route('dashboard')" class="flex items-center gap-1.5 rounded px-2 py-1.5 text-sm text-ink-200 hover:bg-white/10"><ArrowLeft class="h-4 w-4 rtl:rotate-180" />{{ t('Dashboard') }}</Link>
             <div class="h-6 w-px bg-white/15" />
             <div class="leading-tight">
                 <div class="text-sm font-semibold">{{ localName(store) }}</div>
                 <div class="text-[12px] text-ink-300"><template v-if="shift">{{ shift.register }} · {{ t('Shift') }} {{ shift.number }}<template v-if="shift.joined"> · {{ t('opened by :name', { name: shift.opener }) }}</template></template><template v-else>{{ t('No shift open') }}</template> · {{ page.props.auth.user.name }}</div>
             </div>
             <div v-if="shift" class="ms-auto flex items-center gap-1 text-sm">
-                <button v-if="can.hold" class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="showHeld"><PauseCircle class="h-4 w-4" />{{ t('Held carts') }}</button>
+                <button v-if="can.hold && heldCount > 0" class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="showHeld"><PauseCircle class="h-4 w-4" />{{ t('Held carts') }} ({{ heldCount }})</button>
                 <button class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="showRecent"><Receipt class="h-4 w-4" />{{ t('Receipts & returns') }}</button>
                 <button v-if="can.payout || can.drop" class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="modal = 'cash'"><Banknote class="h-4 w-4" />{{ t('Cash in/out') }}</button>
                 <button class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="showX"><ClipboardList class="h-4 w-4" />{{ t('X report') }}</button>
                 <button v-if="can.close" class="flex items-center gap-1.5 rounded px-2.5 py-1.5 hover:bg-white/10" @click="modal = 'close'; zResult = null"><Lock class="h-4 w-4" />{{ t('Close shift') }}</button>
             </div>
-            <div class="ms-2 text-sm tabular-nums text-ink-300">{{ clock.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Karachi' }) }}</div>
+            <button type="button" class="ms-2 flex items-center gap-1.5 rounded px-2.5 py-1.5 text-sm text-ink-200 hover:bg-white/10" :title="t('Language')" @click="toggleLocale"><Languages class="h-4 w-4" /><span>{{ locale === 'ur' ? 'English' : 'اردو' }}</span></button>
+            <span v-if="saveFailed" class="ms-2 rounded bg-ledger-red/30 px-2 py-1 text-[12.5px] text-[#FFC9C1]" role="status">{{ t('Carts not saved yet. Check the connection.') }}</span>
+            <div class="ms-2 text-sm tabular-nums text-ink-300">{{ clock.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: appTimezone() }) }}</div>
         </header>
 
         <!-- Cart tabs: one per customer -->
@@ -641,6 +831,13 @@ onBeforeUnmount(() => clearInterval(clockTimer));
             </div>
             <button type="button" class="mb-1 ms-1 flex shrink-0 items-center gap-1 rounded px-2.5 py-1.5 text-sm text-ink-200 hover:bg-white/10" :title="`${t('New cart')} (F3)`" @click="addTab"><Plus class="h-4 w-4" />{{ t('New cart') }}</button>
         </nav>
+
+        <!-- Another screen saved different carts -->
+        <div v-if="conflict" class="flex shrink-0 flex-wrap items-center gap-3 bg-haldi-100 px-4 py-2 text-sm text-haldi-900" role="alert">
+            <span class="font-medium">{{ t('These carts were changed on another screen.') }}</span>
+            <Button size="sm" variant="primary" @click="loadOtherCarts">{{ t('Load those carts') }}</Button>
+            <Button size="sm" @click="keepMyCarts">{{ t('Keep mine') }}</Button>
+        </div>
 
         <!-- Open shift first -->
         <main v-if="!shift" class="flex flex-1 items-start justify-center overflow-auto p-6">
@@ -701,11 +898,14 @@ onBeforeUnmount(() => clearInterval(clockTimer));
                             <tr><th class="w-8">#</th><th>{{ t('Item') }}</th><th class="w-32">{{ t('Pack') }}</th><th class="w-40 text-center">{{ t('Quantity') }}</th><th class="num">{{ t('Price') }}</th><th class="num">{{ t('Discount') }}</th><th class="num">{{ t('Amount') }}</th><th class="w-10"></th></tr>
                         </thead>
                         <tbody>
-                            <tr v-for="(l, i) in lines" :key="l.key" class="cursor-pointer" :class="selected === i ? '[&>td]:bg-haldi-50' : ''" @click="selected = i">
+                            <tr v-for="(l, i) in lines" :key="l.key" class="cursor-pointer" :class="[selected === i ? '[&>td]:bg-haldi-50' : '', shortOf(l.variant_id) ? '[&>td]:bg-ledger-redSoft' : '']" @click="selected = i">
                                 <td class="tabular-nums text-ink-400">{{ i + 1 }}</td>
                                 <td>
                                     <div class="font-medium leading-snug">{{ l.name }}</div>
                                     <div class="flex gap-3 text-[12px] text-ink-500"><span>{{ l.sku }}</span><span v-if="l.name_ur" class="urdu" dir="rtl">{{ l.name_ur }}</span></div>
+                                    <div v-if="quote?.price_tags?.[i] && !l.unit_price" class="mt-0.5"><span class="inline-flex rounded bg-ledger-greenSoft px-1.5 py-px text-[11.5px] font-medium text-ledger-green">{{ tagText(quote.price_tags[i]) }}</span></div>
+                                    <div v-else-if="quote?.price_hints?.[i] && !l.unit_price" class="mt-0.5 text-[12px] font-medium text-haldi-800">{{ hintText(quote.price_hints[i]) }}</div>
+                                    <div v-if="shortOf(l.variant_id)" class="text-[12.5px] font-medium text-ledger-red">{{ t('Needs :needs, only :have in stock', { needs: shortOf(l.variant_id).needs, have: shortOf(l.variant_id).available }) }}</div>
                                 </td>
                                 <td>
                                     <select v-if="l.units.length > 1" v-model="l.variant_unit_id" class="input py-1 text-sm" @click.stop>
@@ -716,7 +916,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
                                 <td>
                                     <div class="flex items-center justify-center gap-1">
                                         <button class="rounded border border-ink-200 p-1 hover:bg-ink-50" :aria-label="t('Less')" @click.stop="changeQty(i, -1)"><Minus class="h-4 w-4" /></button>
-                                        <input v-model="l.quantity" type="number" min="0" :step="units(l)?.allows_fraction ? '0.001' : '1'" class="input w-16 px-1 py-1 text-center tabular-nums" @click.stop />
+                                        <input v-model="l.quantity" type="number" min="0" step="any" class="input w-16 px-1 py-1 text-center tabular-nums" @click.stop @keydown="onQtyKey($event, l)" />
                                         <button class="rounded border border-ink-200 p-1 hover:bg-ink-50" :aria-label="t('More')" @click.stop="changeQty(i, 1)"><Plus class="h-4 w-4" /></button>
                                     </div>
                                 </td>
@@ -788,7 +988,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
     <div v-if="receipt" class="hidden print:block"><ReceiptView :receipt="receipt" :language="receiptLang" /></div>
     <div v-else-if="zResult || xReport" class="hidden print:block p-4"><ShiftReportView :report="zResult?.report ?? xReport" :kind="zResult ? 'Z' : 'X'" :variance="zResult?.variance" /></div>
 
-    <PaymentDialog :open="modal === 'pay'" :total="total" :methods="paymentMethods" :customer="customer" :can-credit="can.credit" :busy="busy" :error="payError" @close="modal = null; focusSearch()" @pay="pay" />
+    <PaymentDialog :open="modal === 'pay'" :total="total" :methods="paymentMethods" :customer="customer" :can-credit="can.credit" :busy="busy" :error="payError" :shortages="shortages" @close="modal = null; focusSearch()" @pay="pay" />
 
     <Modal :open="modal === 'receipt'" :title="receiptKind === 'sale' ? t('Sale complete') : t('Receipt')" size="md" @close="closeReceipt">
         <div v-if="receipt" class="flex flex-col items-center gap-4">
@@ -806,17 +1006,18 @@ onBeforeUnmount(() => clearInterval(clockTimer));
         </div>
         <template #footer>
             <Button @click="printReceipt"><Printer class="h-4 w-4" />{{ t('Print receipt') }}</Button>
+            <Button v-if="receiptKind === 'reprint' && can.refund && receiptInvoiceId" :href="route('sales.invoices.show', receiptInvoiceId)">{{ t('Return items') }}</Button>
             <Button variant="primary" size="lg" @click="closeReceipt">{{ receiptKind === 'sale' ? t('New sale') : t('Done') }} <kbd class="rounded bg-ink-900/10 px-1.5 text-[11px]">Enter</kbd></Button>
         </template>
     </Modal>
 
  <Modal :open="modal === 'unlisted'" :title="t('Sell an item that is not in the product list')" size="md" @close="modal = null; focusSearch()">
         <form class="space-y-3" @submit.prevent="addUnlisted">
-            <p class="text-[13px] text-ink-500">{{ t('The sale goes through now. The item is added to Inventory → Products to create, so it can be set up properly later.') }}</p>
+            <p class="text-[13px] text-ink-500">{{ t('The sale goes through now. The item is added to Products → Products to create, so it can be set up properly later.') }}</p>
             <label class="block"><span class="field-label">{{ t('Item name') }} *</span><input v-model="unlistedForm.name" class="input" maxlength="120" autofocus required /></label>
             <div class="grid grid-cols-3 gap-3">
-                <label class="block"><span class="field-label">{{ t('Price') }} *</span><input v-model="unlistedForm.price" type="number" step="0.01" min="0.01" class="input text-end tabular-nums" required /></label>
-                <label class="block"><span class="field-label">{{ t('Quantity') }}</span><input v-model="unlistedForm.quantity" type="number" step="any" min="0.001" class="input text-end tabular-nums" /></label>
+                <label class="block"><span class="field-label">{{ t('Price') }} *</span><input v-model="unlistedForm.price" type="number" step="any" min="0.01" class="input text-end tabular-nums" required @keydown="onMoneyKey($event, unlistedForm.price, (v) => (unlistedForm.price = v))" /></label>
+                <label class="block"><span class="field-label">{{ t('Quantity') }}</span><input v-model="unlistedForm.quantity" type="number" step="any" min="0.001" class="input text-end tabular-nums" @keydown="onMoneyKey($event, unlistedForm.quantity, (v) => (unlistedForm.quantity = Number(v) > 0 ? v : '1'))" /></label>
                 <label class="block"><span class="field-label">{{ t('Barcode') }}</span><input v-model="unlistedForm.barcode" class="input" maxlength="64" /></label>
             </div>
             <div class="flex justify-end gap-2"><Button @click="modal = null">{{ t('Cancel') }}</Button><Button type="submit" variant="primary">{{ t('Add to cart') }}</Button></div>
@@ -826,7 +1027,7 @@ onBeforeUnmount(() => clearInterval(clockTimer));
     <Modal :open="modal === 'price'" :title="t('Change price')" size="sm" @close="modal = null">
         <form v-if="priceEdit" class="space-y-3" @submit.prevent="savePrice">
             <p class="text-sm text-ink-600">{{ lines[priceEdit.index]?.name }}</p>
-            <input v-model="priceEdit.price" type="number" step="0.01" min="0" class="input text-end text-2xl tabular-nums" autofocus />
+            <input v-model="priceEdit.price" type="number" step="any" min="0" class="input text-end text-2xl tabular-nums" autofocus @keydown="onMoneyKey($event, priceEdit.price, (v) => (priceEdit!.price = v))" />
             <p v-if="!can.override_price" class="text-[13px] text-ink-500">{{ t('A manager will approve this price with their PIN.') }}</p>
             <div class="flex justify-end gap-2">
                 <Button v-if="lines[priceEdit.index]?.unit_price" @click="lines[priceEdit.index].unit_price = null; lines[priceEdit.index].price_token = null; modal = null">{{ t('Use list price') }}</Button>
@@ -917,6 +1118,20 @@ onBeforeUnmount(() => clearInterval(clockTimer));
 
     <Modal :open="modal === 'camera'" :title="t('Scan with camera')" size="md" @close="stopCamera">
         <div id="camera-reader" class="overflow-hidden rounded" />
+        <button
+            v-if="cameraNotice"
+            type="button"
+            class="mt-3 flex w-full items-center gap-3 rounded-lg px-4 py-3 text-start text-base font-medium"
+            :class="cameraNotice.kind === 'added' ? 'bg-ledger-greenSoft text-ledger-green' : 'bg-ledger-redSoft text-ledger-red'"
+            role="status"
+            :aria-label="t('Close')"
+            @click="cameraNotice = null"
+        >
+            <Check v-if="cameraNotice.kind === 'added'" class="h-5 w-5 shrink-0" /><X v-else class="h-5 w-5 shrink-0" />
+            <span class="flex-1">{{ cameraNotice.text }}</span>
+            <X class="h-5 w-5 shrink-0 opacity-60" />
+        </button>
+        <p v-else class="mt-3 text-center text-sm text-ink-500">{{ t('Keep scanning. The camera stays open until you close it.') }}</p>
     </Modal>
 
     <PinApproval :open="!!approval" :action="approval?.action ?? null" :reason="approval?.reason" @approved="approved" @close="approvalCancelled" />

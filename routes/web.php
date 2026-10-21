@@ -50,6 +50,8 @@ use Illuminate\Support\Facades\Route;
 
 Route::redirect('/', '/dashboard');
 Route::post('/locale', [AccountController::class, 'updateLocale'])->name('locale.update');
+// Sends a fresh XSRF-TOKEN cookie. The POS calls it once when a request is refused with 419 (token expired).
+Route::get('/csrf', fn () => response()->noContent())->name('csrf.refresh');
 
 Route::middleware('guest')->group(function () {
     Route::get('/setup', [SetupController::class, 'show'])->name('setup');
@@ -104,6 +106,8 @@ Route::middleware('auth')->group(function () {
             Route::post('/held/{cart}/resume', 'resume')->name('resume');
             Route::delete('/held/{cart}', 'discard')->name('discard');
             Route::post('/void-log', 'voidLog')->name('void-log');
+            Route::post('/scan', 'scan')->name('scan');
+            Route::put('/workspace', 'saveWorkspace')->name('workspace.save');
         });
         Route::get('/receipts/{invoice}', [PosController::class, 'receipt'])->name('receipt');
         Route::controller(ShiftController::class)->group(function () {
@@ -160,12 +164,24 @@ Route::middleware('auth')->group(function () {
         Route::post('/products', [ProductController::class, 'store'])->name('products.store');
         Route::get('/products/{product}/edit', [ProductController::class, 'edit'])->name('products.edit');
         Route::put('/products/{product}', [ProductController::class, 'update'])->name('products.update');
+        Route::delete('/products/{product}', [ProductController::class, 'destroy'])->name('products.destroy');
+        Route::post('/products-bulk-delete', [ProductController::class, 'bulkDestroy'])->name('products.bulk-destroy');
+        Route::post('/products-bulk-restore', [ProductController::class, 'bulkRestore'])->name('products.bulk-restore');
+        Route::post('/products/{product}/restore', [ProductController::class, 'restore'])->withTrashed()->name('products.restore');
+        Route::delete('/products/{product}/permanent', [ProductController::class, 'forceDestroy'])->withTrashed()->name('products.force-destroy');
         Route::put('/urdu-names', [ProductController::class, 'urduNames'])->name('products.urdu');
         Route::get('/labels', [ProductController::class, 'labels'])->name('labels');
         Route::get('/import', [ProductImportController::class, 'show'])->name('import');
         Route::post('/import', [ProductImportController::class, 'store'])->name('import.store');
         Route::get('/import/template', [ProductImportController::class, 'template'])->name('import.template');
         Route::get('/export', [ProductImportController::class, 'export'])->name('export');
+
+        Route::get('/price-rules', [\App\Http\Controllers\Catalog\PriceRuleController::class, 'index'])->name('price-rules.index');
+        Route::post('/price-rules', [\App\Http\Controllers\Catalog\PriceRuleController::class, 'store'])->name('price-rules.store');
+        Route::post('/price-rules/order', [\App\Http\Controllers\Catalog\PriceRuleController::class, 'reorder'])->name('price-rules.reorder');
+        Route::put('/price-rules/{rule}', [\App\Http\Controllers\Catalog\PriceRuleController::class, 'update'])->name('price-rules.update');
+        Route::delete('/price-rules/{rule}', [\App\Http\Controllers\Catalog\PriceRuleController::class, 'destroy'])->name('price-rules.destroy');
+        Route::post('/price-rules/{rule}/copy', [\App\Http\Controllers\Catalog\PriceRuleController::class, 'copy'])->name('price-rules.copy');
     });
 
     // Inventory
@@ -206,6 +222,7 @@ Route::middleware('auth')->group(function () {
     Route::prefix('purchasing')->name('purchasing.')->group(function () {
         Route::get('/suppliers', [SupplierController::class, 'index'])->name('suppliers.index');
         Route::post('/suppliers', [SupplierController::class, 'store'])->name('suppliers.store');
+        Route::post('/suppliers/quick', [SupplierController::class, 'quickStore'])->name('suppliers.quick');
         Route::get('/suppliers/{supplier}', [SupplierController::class, 'show'])->name('suppliers.show');
         Route::put('/suppliers/{supplier}', [SupplierController::class, 'update'])->name('suppliers.update');
 
@@ -221,6 +238,8 @@ Route::middleware('auth')->group(function () {
         Route::get('/receipts/create', [ReceiptController::class, 'create'])->name('receipts.create');
         Route::post('/receipts', [ReceiptController::class, 'store'])->name('receipts.store');
         Route::get('/receipts/{receipt}', [ReceiptController::class, 'show'])->name('receipts.show');
+        Route::post('/receipts/{receipt}/decide', [ReceiptController::class, 'decide'])->name('receipts.decide');
+        Route::get('/purchase-stock', [ReceiptController::class, 'purchaseStock'])->name('purchase-stock');
 
         Route::get('/bills', [PayablesController::class, 'bills'])->name('bills');
         Route::get('/bills/create', [PayablesController::class, 'createBill'])->name('bills.create');
@@ -236,12 +255,14 @@ Route::middleware('auth')->group(function () {
         Route::get('/customers', [CustomerController::class, 'index'])->name('customers.index');
         Route::get('/customers/create', [CustomerController::class, 'create'])->name('customers.create');
         Route::post('/customers', [CustomerController::class, 'store'])->name('customers.store');
+        Route::post('/customers/quick', [CustomerController::class, 'quickStore'])->name('customers.quick');
         Route::get('/customers/{customer}', [CustomerController::class, 'show'])->name('customers.show');
         Route::get('/customers/{customer}/edit', [CustomerController::class, 'edit'])->name('customers.edit');
         Route::put('/customers/{customer}', [CustomerController::class, 'update'])->name('customers.update');
         Route::post('/customers/{customer}/merge', [CustomerController::class, 'merge'])->name('customers.merge');
         Route::post('/customers/{customer}/activity', [CustomerController::class, 'activity'])->name('customers.activity');
         Route::post('/follow-ups/{followUp}/done', [CustomerController::class, 'updateFollowUp'])->name('follow-ups.done');
+        Route::post('/cases', [CustomerController::class, 'storeCase'])->name('cases.store');
         Route::put('/cases/{case}', [CustomerController::class, 'updateCase'])->name('cases.update');
         Route::get('/work', [CustomerController::class, 'work'])->name('work');
         Route::get('/segments', [SegmentController::class, 'index'])->name('segments');
@@ -277,6 +298,8 @@ Route::middleware('auth')->group(function () {
         Route::get('/employees/{employee}/edit', [EmployeeController::class, 'edit'])->name('employees.edit');
         Route::put('/employees/{employee}', [EmployeeController::class, 'update'])->name('employees.update');
         Route::post('/employees/{employee}/transition', [EmployeeController::class, 'transition'])->name('employees.transition');
+        Route::post('/employees/{employee}/insights', [EmployeeController::class, 'insights'])->name('employees.insights');
+        Route::get('/employees/{employee}/export', [EmployeeController::class, 'export'])->name('employees.export');
         Route::post('/employees/{employee}/salary', [EmployeeController::class, 'salary'])->name('employees.salary');
         Route::post('/employees/{employee}/login', [EmployeeController::class, 'linkLogin'])->name('employees.login');
         Route::post('/employees/{employee}/documents', [EmployeeController::class, 'uploadDocument'])->name('employees.documents');
@@ -285,6 +308,11 @@ Route::middleware('auth')->group(function () {
 
         Route::get('/attendance', [AttendanceController::class, 'index'])->name('attendance');
         Route::post('/attendance/punch', [AttendanceController::class, 'punch'])->name('attendance.punch');
+        Route::get('/breaks', [AttendanceController::class, 'breaks'])->name('breaks');
+        Route::post('/breaks/start', [AttendanceController::class, 'startBreak'])->name('breaks.start');
+        Route::post('/breaks', [AttendanceController::class, 'addBreak'])->name('breaks.store');
+        Route::post('/breaks/{break}/end', [AttendanceController::class, 'endBreak'])->name('breaks.end');
+        Route::delete('/breaks/{break}', [AttendanceController::class, 'deleteBreak'])->name('breaks.destroy');
         Route::get('/roster', [AttendanceController::class, 'roster'])->name('roster');
         Route::post('/roster', [AttendanceController::class, 'assign'])->name('roster.assign');
         Route::post('/attendance/corrections', [AttendanceController::class, 'requestCorrection'])->name('attendance.corrections');
@@ -331,6 +359,8 @@ Route::middleware('auth')->group(function () {
         Route::get('/users/{user}', [UserController::class, 'show'])->name('users.show');
         Route::put('/users/{user}', [UserController::class, 'update'])->name('users.update');
         Route::post('/users/{user}/action', [UserController::class, 'action'])->name('users.action');
+        Route::post('/users/{user}/permissions', [UserController::class, 'setPermission'])->name('users.permissions');
+        Route::post('/users/{user}/permissions/reset', [UserController::class, 'resetPermission'])->name('users.permissions.reset');
         Route::get('/roles', [RoleController::class, 'index'])->name('roles.index');
         Route::post('/roles', [RoleController::class, 'store'])->name('roles.store');
         Route::put('/roles/{role}', [RoleController::class, 'update'])->name('roles.update');

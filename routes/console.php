@@ -41,7 +41,11 @@ Artisan::command('hassani:housekeeping', function () {
     $purged = CurrentCompany::bypass(fn () => app(ReportExporter::class)->purgeExpired());
     $expired = CurrentCompany::bypass(fn () => \App\Models\StockReservation::query()->withoutGlobalScopes()->where('status', 'active')->whereNotNull('expires_at')->where('expires_at', '<', now())->update(['status' => 'expired']));
     $carts = CurrentCompany::bypass(fn () => \App\Models\HeldCart::query()->withoutGlobalScopes()->where('status', 'held')->where('expires_at', '<', now())->update(['status' => 'expired']));
-    $this->info("Purged {$purged} expired exports, released {$expired} reservations, expired {$carts} held carts.");
+    $trash = 0;
+    foreach (Company::query()->where('status', 'active')->get() as $company) {
+        $trash += CurrentCompany::runAs($company, fn () => app(\App\Domain\Catalog\ProductService::class)->purgeExpired());
+    }
+    $this->info("Purged {$purged} expired exports, released {$expired} reservations, expired {$carts} held carts, removed {$trash} products that were in the Trash for over ".\App\Domain\Catalog\ProductService::TRASH_DAYS.' days.');
 })->purpose('Remove expired export files, stock reservations and held carts');
 
 Artisan::command('hassani:reset-owner-password {email}', function (string $email) {

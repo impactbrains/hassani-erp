@@ -33,7 +33,7 @@ class User extends Authenticatable
 
     protected $hidden = ['password', 'remember_token', 'pin_hash', 'two_factor_secret'];
 
-    /** @var array{owner: bool, global: array<string, true>, stores: array<int, array<string, true>>, all_stores: bool, store_ids: list<int>}|null */
+    /** @var array{owner: bool, global: array<string, true>, stores: array<int, array<string, true>>, denied: array<int, array<string, true>>, all_stores: bool, store_ids: list<int>}|null */
     private ?array $permissionMapCache = null;
 
     protected function casts(): array
@@ -58,6 +58,12 @@ class User extends Authenticatable
     public function roleAssignments(): HasMany
     {
         return $this->hasMany(UserRole::class);
+    }
+
+    /** Single permissions given to or taken from this user on top of their roles. */
+    public function permissionOverrides(): HasMany
+    {
+        return $this->hasMany(UserPermissionOverride::class);
     }
 
     /** The employee profile linked to this login, if any. */
@@ -94,10 +100,11 @@ class User extends Authenticatable
         if ($map['owner']) {
             return PermissionRegistry::exists($permission);
         }
-        if (isset($map['global'][$permission])) {
-            return true;
-        }
         $storeId = $store instanceof Store ? $store->id : $store;
+        if (isset($map['global'][$permission])) {
+            // A "take away for this store" override beats a permission held for every store.
+            return $storeId === null || ! isset($map['denied'][$storeId][$permission]);
+        }
         if ($storeId === null) {
             foreach ($map['stores'] as $permissions) {
                 if (isset($permissions[$permission])) {
@@ -132,8 +139,11 @@ class User extends Authenticatable
     public function storeIdsFor(string $permission): array
     {
         $map = $this->permissionMap();
-        if ($map['owner'] || isset($map['global'][$permission])) {
+        if ($map['owner']) {
             return $this->companyStoreIds();
+        }
+        if (isset($map['global'][$permission])) {
+            return array_values(array_filter($this->companyStoreIds(), fn (int $id) => ! isset($map['denied'][$id][$permission])));
         }
         $ids = [];
         foreach ($map['stores'] as $storeId => $permissions) {
@@ -173,14 +183,14 @@ class User extends Authenticatable
         $this->permissionMapCache = null;
     }
 
-    /** @return array{owner: bool, global: array<string, true>, stores: array<int, array<string, true>>, all_stores: bool, store_ids: list<int>} */
+    /** @return array{owner: bool, global: array<string, true>, stores: array<int, array<string, true>>, denied: array<int, array<string, true>>, all_stores: bool, store_ids: list<int>} */
     private function permissionMap(): array
     {
         if ($this->permissionMapCache !== null) {
             return $this->permissionMapCache;
         }
 
-        $map = ['owner' => false, 'global' => [], 'stores' => [], 'all_stores' => false, 'store_ids' => []];
+        $map = ['owner' => false, 'global' => [], 'stores' => [], 'denied' => [], 'all_stores' => false, 'store_ids' => []];
         $assignments = UserRole::query()
             ->withoutGlobalScopes()
             ->where('company_id', $this->company_id)
@@ -207,8 +217,44 @@ class User extends Authenticatable
             }
         }
         $map['store_ids'] = array_values(array_unique($map['store_ids']));
+        if (! $map['owner']) {
+            $this->applyOverrides($map);
+        }
 
         return $this->permissionMapCache = $map;
+    }
+
+    /**
+     * Per-user overrides on top of the roles. Owners are never restricted. An override for one store beats an
+     * override for every store, and a "grant" never opens a store the person has no role in.
+     *
+     * @param  array{owner: bool, global: array<string, true>, stores: array<int, array<string, true>>, denied: array<int, array<string, true>>, all_stores: bool, store_ids: list<int>}  $map
+     */
+    private function applyOverrides(array &$map): void
+    {
+        $overrides = UserPermissionOverride::query()->withoutGlobalScopes()
+            ->where('company_id', $this->company_id)->where('user_id', $this->id)
+            ->orderByRaw('store_id IS NOT NULL')->get(['permission', 'effect', 'store_id']);
+        foreach ($overrides as $override) {
+            $permission = $override->permission;
+            $storeId = $override->store_id;
+            if ($override->effect === UserPermissionOverride::GRANT) {
+                if ($storeId === null) {
+                    $map['global'][$permission] = true;
+                } else {
+                    $map['stores'][$storeId][$permission] = true;
+                    unset($map['denied'][$storeId][$permission]);
+                }
+            } elseif ($storeId === null) {
+                unset($map['global'][$permission]);
+                foreach ($map['stores'] as $id => $permissions) {
+                    unset($map['stores'][$id][$permission]);
+                }
+            } else {
+                unset($map['stores'][$storeId][$permission]);
+                $map['denied'][$storeId][$permission] = true;
+            }
+        }
     }
 
     /** @return list<int> */

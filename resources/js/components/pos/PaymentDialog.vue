@@ -13,7 +13,7 @@ import { localName, t } from '@/lib/i18n';
  * change to give. Wallet and card payments need the transaction reference
  * and are verified against the statement later.
  */
-const props = defineProps<{ open: boolean; total: string; methods: any[]; customer: any | null; canCredit: boolean; busy: boolean; error?: string | null }>();
+const props = defineProps<{ open: boolean; total: string; methods: any[]; customer: any | null; canCredit: boolean; busy: boolean; error?: string | null; shortages?: { variant_id: number; name: string; needs: string; available: string }[] }>();
 const emit = defineEmits<{ close: []; pay: [payments: any[]] }>();
 
 interface Tender { method: any; amount: string; tendered: string; reference: string; terminal_label: string }
@@ -27,7 +27,9 @@ const cash = computed(() => tenders.value.find((x) => x.method.type === 'cash'))
 const change = computed(() => (cash.value && Number(cash.value.tendered) > 0 ? round2(Number(cash.value.tendered) - Number(cash.value.amount)) : 0));
 const onKhata = computed(() => (remaining.value > 0 && props.customer && props.canCredit ? remaining.value : 0));
 const missingRef = computed(() => tenders.value.some((x) => x.method.requires_reference && Number(x.amount) > 0 && !x.reference.trim()));
-const canPay = computed(() => !props.busy && !missingRef.value && remaining.value >= 0 && (remaining.value === 0 || onKhata.value > 0) && change.value >= 0);
+// Negative stock is never allowed: while any item is short, the sale cannot be completed.
+const hasShortages = computed(() => (props.shortages?.length ?? 0) > 0);
+const canPay = computed(() => !props.busy && !hasShortages.value && !missingRef.value && remaining.value >= 0 && (remaining.value === 0 || onKhata.value > 0) && change.value >= 0);
 const quickCash = computed(() => {
     const amount = totalNum.value;
     return [...new Set([amount, Math.ceil(amount / 100) * 100, Math.ceil(amount / 500) * 500, Math.ceil(amount / 1000) * 1000, Math.ceil(amount / 5000) * 5000])].filter((v) => v >= amount).slice(0, 4);
@@ -64,6 +66,12 @@ function submit() {
 <template>
     <Modal :open="open" :title="t('Take payment')" size="lg" @close="emit('close')">
         <form @submit.prevent="submit">
+            <div v-if="hasShortages" class="mb-4 rounded-lg border border-ledger-red/40 bg-ledger-redSoft px-4 py-3 text-ledger-red" role="alert">
+                <div class="font-semibold">{{ t('Not enough stock for these items. Go back to the cart and lower the quantity, or remove them.') }}</div>
+                <ul class="mt-1.5 space-y-0.5 text-[14.5px]">
+                    <li v-for="x in shortages" :key="x.variant_id">{{ x.name }}: {{ t('needs :needs, only :have', { needs: x.needs, have: x.available }) }}</li>
+                </ul>
+            </div>
             <div class="mb-4 flex items-baseline justify-between rounded-lg bg-ink-800 px-5 py-4 text-white">
                 <span class="text-ink-200">{{ t('Total') }}</span>
                 <span class="text-4xl font-semibold tabular-nums">{{ money(total) }}</span>

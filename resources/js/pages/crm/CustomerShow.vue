@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { router, useForm } from '@inertiajs/vue3';
-import { Pencil, Printer } from 'lucide-vue-next';
+import { ChevronLeft, ChevronRight, Pencil, Printer } from 'lucide-vue-next';
 import PageHeader from '@/components/ui/PageHeader.vue';
 import Button from '@/components/ui/Button.vue';
 import Badge from '@/components/ui/Badge.vue';
@@ -14,7 +14,7 @@ import { date, dateTime, money, today } from '@/lib/format';
 import { can as hasPerm } from '@/lib/perms';
 import { t } from '@/lib/i18n';
 
-const props = defineProps<{ customer: any; khata: any | null; promises: any[]; interactions: any[]; followUps: any[]; cases: any[]; invoices: any[]; orders: any[]; stats: any; filters: { from: string; to: string }; can: Record<string, boolean> }>();
+const props = defineProps<{ pager?: any; customer: any; khata: any | null; promises: any[]; interactions: any[]; followUps: any[]; cases: any[]; invoices: any[]; orders: any[]; stats: any; filters: { from: string; to: string }; can: Record<string, boolean> }>();
 const tab = ref(props.khata ? 'khata' : 'activity');
 const period = ref({ ...props.filters });
 function reloadStatement() {
@@ -38,6 +38,19 @@ function merge() {
     if (!dup.value) return;
     router.post(route('crm.customers.merge', props.customer.id), { duplicate_id: dup.value.id }, { onSuccess: () => (modal.value = '') });
 }
+/** The complaints that can still be updated. The arrows in the Update window step through these, wrapping round at the ends. */
+const openCases = computed(() => props.cases.filter((k: any) => !['resolved', 'closed'].includes(k.status)));
+const casePosition = computed(() => openCases.value.findIndex((k: any) => k.id === caseEdit.value?.id));
+function openCase(k: any) {
+    caseEdit.value = k;
+    caseForm.status = 'resolved';
+    caseForm.resolution = '';
+    caseForm.clearErrors();
+}
+function stepCase(by: number) {
+    const n = openCases.value.length;
+    if (n > 1 && casePosition.value >= 0) openCase(openCases.value[(casePosition.value + by + n) % n]);
+}
 function saveCase() {
     caseForm.put(route('crm.cases.update', caseEdit.value.id), { preserveScroll: true, onSuccess: () => (caseEdit.value = null) });
 }
@@ -48,7 +61,7 @@ const channels: Record<string, string> = { call: 'Call', visit: 'Visit', whatsap
 </script>
 
 <template>
-    <PageHeader :title="customer.name" :subtitle="`${customer.code}${customer.area ? ' · ' + customer.area : ''}${customer.phone ? ' · ' + customer.phone : ''}`">
+    <PageHeader :pager="pager" :title="customer.name" :subtitle="`${customer.code}${customer.area ? ' · ' + customer.area : ''}${customer.phone ? ' · ' + customer.phone : ''}`">
         <template #actions>
             <Badge v-if="!customer.is_active" status="inactive" />
             <Badge v-if="customer.customer_profile?.credit_status && customer.customer_profile.credit_status !== 'active'" :status="customer.customer_profile.credit_status" />
@@ -138,7 +151,7 @@ const channels: Record<string, string> = { call: 'Call', visit: 'Visit', whatsap
                 <tr v-for="k in cases" :key="k.id">
                     <td>{{ k.number }}</td><td>{{ date(k.created_at) }}</td><td>{{ t(k.type.replace('_', ' ')) }}</td><td><div class="font-medium">{{ k.subject }}</div><div v-if="k.resolution" class="text-[12.5px] text-ink-600">{{ k.resolution }}</div></td>
                     <td><Badge :tone="k.priority === 'urgent' || k.priority === 'high' ? 'bad' : 'neutral'" :label="t(k.priority)" /></td><td>{{ k.owner?.name }}</td><td><Badge :status="k.status" /></td>
-                    <td><Button v-if="hasPerm('crm.cases.manage') && !['resolved', 'closed'].includes(k.status)" size="sm" @click="caseEdit = k; caseForm.status = 'resolved'; caseForm.resolution = ''">{{ t('Update') }}</Button></td>
+                    <td><Button v-if="hasPerm('crm.cases.manage') && !['resolved', 'closed'].includes(k.status)" size="sm" @click="openCase(k)">{{ t('Update') }}</Button></td>
                 </tr>
                 <tr v-if="!cases.length"><td colspan="8" class="py-6 text-center text-ink-500">{{ t('No complaints.') }}</td></tr>
             </tbody>
@@ -173,7 +186,7 @@ const channels: Record<string, string> = { call: 'Call', visit: 'Visit', whatsap
         <div><span class="field-label">{{ t('Phones') }}</span>{{ customer.phone ?? '—' }} {{ customer.alt_phone ? ' / ' + customer.alt_phone : '' }}</div>
         <div><span class="field-label">{{ t('E-mail') }}</span>{{ customer.email ?? '—' }}</div>
         <div><span class="field-label">{{ t('Delivery instructions') }}</span>{{ customer.delivery_instructions ?? '—' }}</div>
-        <div><span class="field-label">{{ t('Price list') }}</span>{{ customer.customer_profile?.price_book?.name ?? t('Standard retail') }}</div>
+        <div><span class="field-label">{{ t('Price list') }}</span>{{ customer.customer_profile?.price_book?.name ?? t('In-store (standard)') }}</div>
         <div><span class="field-label">{{ t('Sales agent') }}</span>{{ customer.customer_profile?.sales_agent?.name ?? '—' }}</div>
         <div><span class="field-label">{{ t('NTN / CNIC') }}</span>{{ customer.tax_number ?? '—' }}</div>
         <div><span class="field-label">{{ t('Offers by SMS / WhatsApp') }}</span>{{ customer.customer_profile?.marketing_consent ? t('Yes') : t('No') }}</div>
@@ -218,6 +231,12 @@ const channels: Record<string, string> = { call: 'Call', visit: 'Visit', whatsap
             <Field label="Status"><select v-model="caseForm.status" class="input"><option value="in_progress">{{ t('Working on it') }}</option><option value="resolved">{{ t('Resolved') }}</option><option value="closed">{{ t('Closed') }}</option></select></Field>
             <Field label="What was done" :error="caseForm.errors.resolution"><textarea v-model="caseForm.resolution" rows="3" class="input" /></Field>
         </div>
-        <template #footer><Button @click="caseEdit = null">{{ t('Cancel') }}</Button><Button variant="primary" :loading="caseForm.processing" @click="saveCase">{{ t('Save') }}</Button></template>
+        <template #footer>
+            <div v-if="openCases.length > 1 && casePosition >= 0" class="me-auto inline-flex items-center rounded border border-ink-200 bg-white text-ink-700">
+                <button type="button" class="flex h-8 w-8 items-center justify-center rounded-s hover:bg-ink-50" :title="t('Previous complaint')" :aria-label="t('Previous complaint')" @click="stepCase(-1)"><ChevronLeft class="h-4 w-4 rtl:rotate-180" /></button>
+                <span class="min-w-[4.5rem] select-none border-x border-ink-200 px-2 text-center text-[13px] leading-8 tabular-nums text-ink-600">{{ t(':position of :total', { position: casePosition + 1, total: openCases.length }) }}</span>
+                <button type="button" class="flex h-8 w-8 items-center justify-center rounded-e hover:bg-ink-50" :title="t('Next complaint')" :aria-label="t('Next complaint')" @click="stepCase(1)"><ChevronRight class="h-4 w-4 rtl:rotate-180" /></button>
+            </div>
+            <Button @click="caseEdit = null">{{ t('Cancel') }}</Button><Button variant="primary" :loading="caseForm.processing" @click="saveCase">{{ t('Save') }}</Button></template>
     </Modal>
 </template>

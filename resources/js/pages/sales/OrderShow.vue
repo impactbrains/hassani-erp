@@ -12,7 +12,7 @@ import { dateTime, money, qty } from '@/lib/format';
 import { localName, t } from '@/lib/i18n';
 import { get } from '@/lib/http';
 
-const props = defineProps<{ order: any; can: { manage: boolean; confirm: boolean; deliver: boolean }; cancelReasons: any[] }>();
+const props = defineProps<{ pager?: any; order: any; can: { manage: boolean; confirm: boolean; deliver: boolean }; cancelReasons: any[] }>();
 const s = () => props.order.status;
 const cancelling = ref(false);
 const cancelReason = ref<number | null>(props.cancelReasons[0]?.id ?? null);
@@ -36,7 +36,7 @@ async function openDispatch() {
 </script>
 
 <template>
-    <PageHeader :title="`${t('Order')} ${order.number}`" :subtitle="`${order.customer?.name} · ${dateTime(order.created_at)} · ${order.creator?.name ?? ''}`">
+    <PageHeader :pager="pager" :title="`${t('Order')} ${order.number}`" :subtitle="`${order.customer?.name} · ${dateTime(order.created_at)} · ${order.creator?.name ?? ''}`">
         <template #actions>
             <Badge :status="order.status" />
             <Button v-if="s() === 'draft' && can.manage" :href="route('sales.orders.edit', order.id)"><Pencil class="h-4 w-4" />{{ t('Edit') }}</Button>

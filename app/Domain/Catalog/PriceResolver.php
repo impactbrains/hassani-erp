@@ -49,6 +49,40 @@ final class PriceResolver
         return null;
     }
 
+    /** The price of a pack on one list, ignoring quantity tiers (a "from N units" price is a price rule now). */
+    public function bookPrice(ProductVariant|int $variant, VariantUnit|int $unit, ?int $bookId, ?\DateTimeInterface $at = null): ?string
+    {
+        if ($bookId === null) {
+            return null;
+        }
+        $at ??= now();
+
+        return Price::query()
+            ->where('price_book_id', $bookId)
+            ->where('variant_id', $variant instanceof ProductVariant ? $variant->id : $variant)
+            ->where('variant_unit_id', $unit instanceof VariantUnit ? $unit->id : $unit)
+            ->where('effective_from', '<=', $at)
+            ->where(fn ($q) => $q->whereNull('effective_to')->orWhere('effective_to', '>', $at))
+            ->where('min_quantity', '<=', 1)
+            ->orderByDesc('effective_from')->orderByDesc('id')
+            ->value('price');
+    }
+
+    /** @var array<int, ?int> */
+    private array $wholesaleBook = [];
+
+    /** The Wholesale price list (code WHOLESALE, or the first active list of kind wholesale). */
+    public function wholesaleBookId(): ?int
+    {
+        $companyId = \App\Support\Tenancy\CurrentCompany::require();
+        if (! array_key_exists($companyId, $this->wholesaleBook)) {
+            $this->wholesaleBook[$companyId] = PriceBook::query()->where('code', 'WHOLESALE')->value('id')
+                ?? PriceBook::query()->where('kind', 'wholesale')->where('is_active', true)->orderBy('id')->value('id');
+        }
+
+        return $this->wholesaleBook[$companyId];
+    }
+
     public function defaultBookId(): ?int
     {
         $companyId = \App\Support\Tenancy\CurrentCompany::require();

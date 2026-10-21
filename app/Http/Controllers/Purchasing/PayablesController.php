@@ -8,6 +8,7 @@ use App\Models\GoodsReceiptLine;
 use App\Models\Shift;
 use App\Models\SupplierBill;
 use App\Models\SupplierReturn;
+use App\Support\Pager;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,14 +20,21 @@ class PayablesController extends Controller
 {
     public function bills(Request $request): Response
     {
+        Pager::remember($request, 'purchasing.bills');
         $stores = $request->user()->storeIdsFor('purchasing.bills.manage');
 
         return Inertia::render('purchasing/Bills', [
-            'bills' => SupplierBill::query()->whereIn('store_id', $stores)->with('supplier:id,name')->when($request->query('payment_status'), fn ($q, $s) => $q->where('payment_status', $s))
-                ->latest('id')->paginate($this->perPage($request))->withQueryString(),
+            'bills' => $this->billsQuery($request)->with('supplier:id,name')->paginate($this->perPage($request))->withQueryString(),
             'returns' => SupplierReturn::query()->whereIn('store_id', $stores)->with('supplier:id,name', 'reasonCode:id,label')->latest('id')->limit(20)->get(),
             'filters' => $request->only(['payment_status']),
         ]);
+    }
+
+    /** The bills list as filtered on screen. The next / previous arrows on a bill walk through this same list. */
+    private function billsQuery(Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        return SupplierBill::query()->whereIn('store_id', $request->user()->storeIdsFor('purchasing.bills.manage'))
+            ->when($request->query('payment_status'), fn ($q, $s) => $q->where('payment_status', $s))->latest('id');
     }
 
     public function createBill(Request $request): Response
@@ -56,6 +64,7 @@ class PayablesController extends Controller
         $this->allow($request, 'purchasing.bills.manage', $bill->store_id);
 
         return Inertia::render('purchasing/BillShow', [
+            'pager' => Pager::for($request, 'purchasing.bills', $bill->id, fn (Request $r) => $this->billsQuery($r), fn (int $id) => route('purchasing.bills.show', $id)),
             'bill' => $bill->load('lines', 'supplier:id,name', 'store:id,name'),
             'openShift' => Shift::query()->where('store_id', $bill->store_id)->where('status', 'open')->where('opened_by', $request->user()->id)->value('id'),
         ]);
